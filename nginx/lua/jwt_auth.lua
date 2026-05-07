@@ -27,6 +27,8 @@ local PUBLIC_PATHS = {
     ["/health"]          = true,
     ["/favicon.ico"]     = true,
     ["/doctor/signup/"]  = true,  
+    ["/userappointment/"] = true,         
+    ["/User_SearchAppointment/"] = true,  
 }
 
 -- =============================================================================

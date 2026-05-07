@@ -27,6 +27,8 @@ _PUBLIC_PATHS = frozenset([
     "/static/",
     "/media/",
     "/favicon.ico",
+    "/userappointment/",         
+    "/User_SearchAppointment/",  
 ])
 
 # FIX 2: Đồng bộ với WEB_PREFIXES_PATTERN của jwt_auth.lua
