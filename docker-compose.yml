@@ -38,6 +38,7 @@ services:
     # FIX 2: Bỏ collectstatic để tăng tốc độ boot. Chỉ giữ lại migrate và Gunicorn.
     command: >
       sh -c "
+      python manage.py collectstatic --noinput &&
       python manage.py migrate --noinput &&
       gunicorn docappsystem.wsgi:application 
       --bind 0.0.0.0:8000 
