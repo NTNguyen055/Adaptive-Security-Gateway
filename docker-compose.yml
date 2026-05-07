@@ -12,6 +12,9 @@ services:
     container_name: docapp_django
     restart: unless-stopped
 
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+
     expose:
       - "8000"
 
@@ -74,6 +77,9 @@ services:
     container_name: docapp_redis
     restart: unless-stopped
 
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+
     command: >
       redis-server
       --maxmemory 128mb
@@ -113,6 +119,9 @@ services:
     image: ntnguyen055/api-security-gateway:latest
     container_name: openresty_gateway
     restart: unless-stopped
+
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
 
     ports:
       - "80:80"

@@ -5,8 +5,11 @@ RUN apk add --no-cache \
     ca-certificates \
     libmaxminddb \
     libmaxminddb-dev \
+    tzdata \
     openssl \
     curl \
+    && cp /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime \
+    && echo "Asia/Ho_Chi_Minh" > /etc/timezone \
     && update-ca-certificates
 
 # ================= LUA ROCKS =================
