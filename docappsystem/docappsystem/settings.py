@@ -85,13 +85,10 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # ============================================================
 # SECURITY HEADERS
 # ============================================================
-SECURE_SSL_REDIRECT              = True
-SECURE_HSTS_SECONDS              = 31536000
-SECURE_HSTS_INCLUDE_SUBDOMAINS   = True
-SECURE_HSTS_PRELOAD               = True
-SECURE_CONTENT_TYPE_NOSNIFF      = True
-SECURE_REFERRER_POLICY           = "strict-origin-when-cross-origin"
-X_FRAME_OPTIONS                  = "SAMEORIGIN"
+SECURE_SSL_REDIRECT              = False  # Nginx đã lo việc Redirect HTTP -> HTTPS
+SECURE_HSTS_SECONDS              = 0      # Tắt HSTS của Django
+SECURE_CONTENT_TYPE_NOSNIFF      = False  # Tắt Nosniff của Django
+SECURE_REFERRER_POLICY           = None   # Tắt Referrer Policy của Django
 
 # ============================================================
 # APPLICATION
@@ -120,7 +117,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "docappsystem.middleware.GatewayIdentityMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF      = "docappsystem.urls"

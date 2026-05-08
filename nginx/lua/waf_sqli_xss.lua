@@ -172,6 +172,15 @@ function _M.run(ctx)
     local method = ngx.req.get_method()
     if method ~= "POST" and method ~= "PUT" and method ~= "PATCH" then return end
 
+    local content_type = (headers["content-type"] or ""):lower()
+
+    -- [TỐI ƯU CẤU TRÚC] Đưa check Multipart lên trước để bảo vệ File Uploads
+    if content_type:find("multipart/form-data", 1, true) then
+        -- Bỏ qua quét Raw Body với file Multipart (Ảnh, Video...) để tránh False Positive.
+        ngx.log(ngx.INFO, "[WAF] Skipped raw body scan for multipart data to prevent false positive")
+        return
+    end
+
     ngx.req.read_body()
     local body = ngx.req.get_body_data()
 
@@ -179,17 +188,23 @@ function _M.run(ctx)
         local file = ngx.req.get_body_file()
         if file then
             local f = io.open(file, "r")
-            if f then body = f:read(512 * 1024); f:close() end
+            -- Đọc thử 1MB + 1 byte. Nếu file vượt quá mốc này, nó sẽ bị tóm ở chốt chặn bên dưới.
+            if f then body = f:read(1024 * 1024 + 1); f:close() end
         end
     end
 
     if not body then return end
-    if #body > 512 * 1024 then body = body:sub(1, 512 * 1024) end
 
-    local content_type = (headers["content-type"] or ""):lower()
+    -- [VÁ LỖ HỔNG CHÍ MẠNG] Chống bypass bằng JSON Padding / Whitespace Injection
+    -- Payload không phải là file upload mà nặng hơn 1MB -> Chặn đứng lập tức
+    if #body > 1024 * 1024 then
+        local ip = (ctx.security and ctx.security.client_ip) or ngx.var.remote_addr
+        ngx.log(ngx.WARN, "[WAF] Payload too large (", #body, " bytes) from ip=", ip, ", dropping request to prevent bypass")
+        return ngx.exit(ngx.HTTP_REQUEST_ENTITY_TOO_LARGE) -- Trả về HTTP 413
+    end
 
     if content_type:find("application/json", 1, true) then
-        -- FIX 3: Parse cấu trúc JSON để quét chính xác từng trường (Tránh JSON escape bypass)
+        -- Parse cấu trúc JSON để quét chính xác từng trường (Tránh JSON escape bypass)
         local data = cjson.decode(body)
         if type(data) == "table" then
             scan_args(data, ctx)
@@ -199,9 +214,6 @@ function _M.run(ctx)
     elseif content_type:find("application/x-www-form-urlencoded", 1, true) then
         local post_args, _ = ngx.req.get_post_args(100)
         if post_args then scan_args(post_args, ctx) else check(body, ctx, "body:form") end
-    elseif content_type:find("multipart/form-data", 1, true) then
-        -- FIX 8: Bỏ qua quét Raw Body với file Multipart (Ảnh, Video...) để tránh False Positive.
-        ngx.log(ngx.INFO, "[WAF] Skipped raw body scan for multipart data to prevent false positive")
     else
         check(body, ctx, "body:raw")
     end
