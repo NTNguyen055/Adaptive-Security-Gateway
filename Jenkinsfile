@@ -266,7 +266,7 @@ while [ "${RETRY}" -lt "${HEALTH_RETRIES}" ]; do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -H "Host: ${HEALTH_DOMAIN}" -H "X-Forwarded-Proto: https" "http://localhost/health/" || echo "000")
     
     # FIX 5: Bổ sung check qua Gateway Security Pipeline để đảm bảo file Lua không chết
-    SEC_CODE=$(curl -k -sf -o /dev/null -w "%{http_code}" -H "Host: ${HEALTH_DOMAIN}" "https://localhost/login/" || echo "000")
+    SEC_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" -A "healthchecker" -H "Host: ${HEALTH_DOMAIN}" "https://localhost/login/")
     
     if [ "${HTTP_CODE}" = "200" ] && [ "${SEC_CODE}" = "200" ]; then
         HTTP_OK=1
