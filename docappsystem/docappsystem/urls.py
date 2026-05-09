@@ -103,7 +103,7 @@ urlpatterns = [
 
     # ── CUSTOM ADMIN PANEL ───────────────────────────────────
     # FIX: Sửa thành ADMINHOME viết hoa
-    path("admin/home/",
+    path("admin/",
          adminviews.ADMINHOME, name="admin_home"),
 
     path("admin/specialization/",
