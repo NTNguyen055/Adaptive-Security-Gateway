@@ -111,27 +111,41 @@ function _M.run(ctx)
         final_risk = final_risk * 0.8
     end
 
-    -- FIX 4: Trừng phạt theo cấp độ - Kẻ càng nguy hiểm bị nhớ càng lâu
-    local rep_ttl = 3600 -- Mặc định 1 giờ
-    if final_risk >= cfg.block_threshold then
-        rep_ttl = 86400  -- Bị Block: Ghi nhớ 24 giờ
-    elseif final_risk >= cfg.limit_threshold then
-        rep_ttl = 7200   -- Bị Limit: Ghi nhớ 2 giờ
-    end
+    -- =========================================================================
+    -- [FIX HIỆU NĂNG - ENTERPRISE STANDARD]: TỐI ƯU HÓA REDIS WRITE I/O
+    -- Chỉ thực hiện ghi xuống Redis nếu:
+    -- 1. IP này vừa gây ra rủi ro (final_risk > 0.01)
+    -- 2. Hoặc IP này đang có "tiền án" và cần cập nhật lại điểm số (reputation > 0.01)
+    -- Nếu cả hai đều = 0 (Người dùng hoàn toàn sạch), BỎ QUA lệnh ghi!
+    -- =========================================================================
+    if final_risk >= 0.01 or reputation >= 0.01 then
+        
+        -- FIX 4: Trừng phạt theo cấp độ - Kẻ càng nguy hiểm bị nhớ càng lâu
+        local rep_ttl = 3600 -- Mặc định 1 giờ
+        if final_risk >= cfg.block_threshold then
+            rep_ttl = 86400  -- Bị Block: Ghi nhớ 24 giờ
+        elseif final_risk >= cfg.limit_threshold then
+            rep_ttl = 7200   -- Bị Limit: Ghi nhớ 2 giờ
+        end
 
-    -- Ghi điểm Uy tín (Reputation) mới vào Redis
-    red:set(key, string.format("%.2f", final_risk), "EX", rep_ttl)
+        -- Ghi điểm Uy tín mới vào Redis
+        red:set(key, string.format("%.2f", final_risk), "EX", rep_ttl)
+    end
+    
+    -- Luôn nhớ đóng kết nối Redis để trả về Pool, tránh tràn RAM
     redis_helper.close(red)
 
-    -- Log chi tiết (Forensics)
-    ngx.log(ngx.INFO,
-        "[RISK] ip=", ip,
-        " base=", string.format("%.1f", base_risk),
-        " rep=", string.format("%.1f", reputation),
-        " bonus=", bonus,
-        " final=", string.format("%.1f", final_risk),
-        " signals=[", table.concat(signals, ","), "]"
-    )
+    -- Log chi tiết (Forensics) - Nên bọc lại để không log rác với traffic sạch
+    if final_risk >= 0.01 then
+        ngx.log(ngx.INFO,
+            "[RISK] ip=", ip,
+            " base=", string.format("%.1f", base_risk),
+            " rep=", string.format("%.1f", reputation),
+            " bonus=", bonus,
+            " final=", string.format("%.1f", final_risk),
+            " signals=[", table.concat(signals, ","), "]"
+        )
+    end
 
     -- ── DECISION (Quyết định hành động) ───────────────────────
     if final_risk >= cfg.block_threshold then
@@ -146,6 +160,12 @@ function _M.run(ctx)
     end
 
     ctx.security.risk_final = final_risk
+
+    -- [FIX LOG]: Đẩy kết quả từ Lua ra biến Nginx để file access.log ghi nhận được 
+    -- mà không làm lộ dữ liệu qua HTTP Response Header
+    ngx.var.log_risk_score = string.format("%.1f", final_risk)
+    ngx.var.log_security_block = ctx.security.risk_action or "pass"
+    
 end
 
 return _M

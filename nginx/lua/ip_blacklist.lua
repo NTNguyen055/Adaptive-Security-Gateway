@@ -106,12 +106,15 @@ function _M.run(ctx)
         return
     end
 
-    -- Negative cache: số 0 (IP sạch) — chỉ cache khi risk thấp
-    if cache and (ctx.security.risk or 0) < 20 then
+    -- ── NEGATIVE CACHE ───────────────────────────────────────
+    -- [FIX HIỆU NĂNG CHÍ MẠNG]: Cache IP sạch (số 0) vô điều kiện trong 30s.
+    -- Xóa bỏ điều kiện risk < 20 để tránh việc hacker lợi dụng request rác 
+    -- ép Nginx phải liên tục query xuống Redis (Bypass L1 Cache).
+    if cache then
         cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
     end
 
-    -- [SỬA ĐỔI] Đã xóa table.insert(ctx.security.signals, "ip_clean") để giảm nhiễu log
+    -- Đã xóa table.insert(ctx.security.signals, "ip_clean") để giảm nhiễu log
 end
 
 return _M

@@ -90,6 +90,9 @@ SECURE_HSTS_SECONDS              = 0      # Tắt HSTS của Django
 SECURE_CONTENT_TYPE_NOSNIFF      = False  # Tắt Nosniff của Django
 SECURE_REFERRER_POLICY           = None   # Tắt Referrer Policy của Django
 
+# FIX: Cấu hình Clickjacking đồng bộ với Nginx Gateway
+X_FRAME_OPTIONS                  = "SAMEORIGIN"
+
 # ============================================================
 # APPLICATION
 # ============================================================
@@ -109,15 +112,13 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    # FIX 1: WhiteNoiseMiddleware đã bị gỡ khỏi đây và sẽ được chèn động (Dynamic Injection)
-    # ở bên dưới, CHỈ KHI hệ thống không sử dụng AWS S3.
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "docappsystem.middleware.GatewayIdentityMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    # "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF      = "docappsystem.urls"

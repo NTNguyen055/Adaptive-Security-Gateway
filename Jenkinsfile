@@ -16,11 +16,6 @@ pipeline {
         timestamps()
     }
 
-    // FIX 1: Dùng Parameters thay vì Hardcode IP vào biến môi trường để bảo mật
-    parameters {
-        string(name: 'EC2_APP_IP', defaultValue: '13.159.56.185', description: 'Public IP of the EC2 Server')
-    }
-
     // =========================================================================
     // ENVIRONMENT
     // =========================================================================
@@ -29,12 +24,15 @@ pipeline {
         GW_IMAGE  = 'ntnguyen055/api-security-gateway'
         IMAGE_TAG = "v${BUILD_NUMBER}"
 
-        DOCKER_BUILDKIT          = '1'
+        DOCKER_BUILDKIT   = '1'
         COMPOSE_DOCKER_CLI_BUILD = '1'
 
         DOCKERHUB_CREDS = credentials('dockerhub-cred-AGWS')
         EC2_SSH_CREDS   = 'app-server-ssh'
-        // FIX 1: Đã xóa dòng EC2_APP_IP hardcode ở đây
+        
+        // FIX BẢO MẬT: Lấy IP từ két sắt Jenkins, ẩn hoàn toàn khỏi Log và Source Code
+        EC2_APP_IP      = credentials('ec2-prod-ip') 
+        
         EC2_USER        = 'ubuntu'
 
         BASE_DIR        = '/home/ubuntu/appointment-web'
@@ -104,10 +102,16 @@ pipeline {
 
                 sh '''
                     echo "--- Building Django App ---"
+                    COMMIT_SHA=$(git rev-parse HEAD)
+                    BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
                     docker build \
                         --pull \
                         --cache-from ${APP_IMAGE}:latest \
                         --build-arg BUILDKIT_INLINE_CACHE=1 \
+                        --build-arg COMMIT_SHA=${COMMIT_SHA} \
+                        --build-arg BUILD_DATE=${BUILD_DATE} \
+                        --build-arg VERSION=${IMAGE_TAG} \
                         -t ${APP_IMAGE}:${IMAGE_TAG} \
                         -t ${APP_IMAGE}:latest \
                         -f docappsystem/Dockerfile \
@@ -116,10 +120,16 @@ pipeline {
 
                 sh '''
                     echo "--- Building OpenResty Gateway ---"
+                    COMMIT_SHA=$(git rev-parse HEAD)
+                    BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
                     docker build \
                         --pull \
                         --cache-from ${GW_IMAGE}:latest \
                         --build-arg BUILDKIT_INLINE_CACHE=1 \
+                        --build-arg COMMIT_SHA=${COMMIT_SHA} \
+                        --build-arg BUILD_DATE=${BUILD_DATE} \
+                        --build-arg VERSION=${IMAGE_TAG} \
                         -t ${GW_IMAGE}:${IMAGE_TAG} \
                         -t ${GW_IMAGE}:latest \
                         -f nginx/Dockerfile \
@@ -192,7 +202,7 @@ pipeline {
         // ── STAGE 6: DEPLOY TO EC2 ────────────────────────────────────────────
         stage('Deploy & Verify') {
             steps {
-                echo "🚢 [6/6] Deploying to EC2 (${params.EC2_APP_IP})..."
+                echo "🚢 [6/6] Deploying to EC2 (${EC2_APP_IP})..."
 
                 script {
                     // FIX 8: Bỏ cơ chế replace chuỗi nguy hiểm, ghi thẳng ra file script nguyên bản
@@ -301,9 +311,23 @@ log "=================================================="
                 }
 
                 sshagent(credentials: [EC2_SSH_CREDS]) {
-                    // FIX 8: Truyền biến môi trường an toàn vào luồng stdin thay vì copy/paste file
+                    // FIX BẢO MẬT (Chuẩn TOFU): Quét và lưu Host Key tự động, từ chối kết nối nếu bị MITM
                     sh """
-                        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${EC2_USER}@${params.EC2_APP_IP} "APP_IMAGE=${APP_IMAGE} GW_IMAGE=${GW_IMAGE} IMAGE_TAG=${IMAGE_TAG} APP_DIR=${APP_DIR} BASE_DIR=${BASE_DIR} ENV_PATH=${ENV_PATH} HEALTH_DOMAIN=${HEALTH_DOMAIN} HEALTH_RETRIES=${HEALTH_RETRIES} COMPOSE_TIMEOUT=${COMPOSE_TIMEOUT} bash -s" < deploy.sh
+                        # 1. Khởi tạo thư mục SSH bảo mật cho user jenkins
+                        mkdir -p ~/.ssh
+                        chmod 700 ~/.ssh
+                        
+                        # 2. Kiểm tra xem vân tay (Host Key) của EC2 đã có trong két chưa
+                        if ! ssh-keygen -F ${EC2_APP_IP} > /dev/null; then
+                            echo "⚠️ Lần đầu kết nối tới ${EC2_APP_IP}. Đang quét và lưu dấu vân tay..."
+                            ssh-keyscan -H ${EC2_APP_IP} >> ~/.ssh/known_hosts
+                        else
+                            echo "✅ Dấu vân tay của ${EC2_APP_IP} đã được xác thực an toàn trong known_hosts."
+                        fi
+                        chmod 644 ~/.ssh/known_hosts
+
+                        # 3. Tiến hành SSH với chế độ bảo mật CỰC KỲ NGHIÊM NGẶT (Strict=yes)
+                        ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=15 ${EC2_USER}@${EC2_APP_IP} "APP_IMAGE=${APP_IMAGE} GW_IMAGE=${GW_IMAGE} IMAGE_TAG=${IMAGE_TAG} APP_DIR=${APP_DIR} BASE_DIR=${BASE_DIR} ENV_PATH=${ENV_PATH} HEALTH_DOMAIN=${HEALTH_DOMAIN} HEALTH_RETRIES=${HEALTH_RETRIES} COMPOSE_TIMEOUT=${COMPOSE_TIMEOUT} bash -s" < deploy.sh
                     """
                 }
             }
@@ -325,13 +349,10 @@ log "=================================================="
             sh 'docker logout || true'
             sh '''
                 docker rmi ${APP_IMAGE}:${IMAGE_TAG} 2>/dev/null || true
-                # FIX 7: Bỏ xóa ${APP_IMAGE}:latest để giữ Cache cho Jenkins build lẹ hơn
                 docker rmi ${GW_IMAGE}:${IMAGE_TAG}  2>/dev/null || true
-                # FIX 7: Bỏ xóa ${GW_IMAGE}:latest
                 docker image prune -f                2>/dev/null || true
             '''
             
-            // FIX: Sử dụng ngoặc kép (""") để Groovy có thể nội suy các biến vào script Bash
             script {
                 def result   = currentBuild.currentResult ?: 'UNKNOWN'
                 def jobName  = env.JOB_NAME
@@ -351,12 +372,26 @@ log "=================================================="
         }
         success {
             echo "Pipeline #${BUILD_NUMBER} PASSED — ${APP_IMAGE}:${IMAGE_TAG} deployed"
+            
+            // [NÂNG CẤP]: Thông báo Slack khi Thành công (Màu xanh)
+            // LƯU Ý: Cần cài đặt plugin "Slack Notification" trên Jenkins
+            // slackSend(color: 'good', message: "✅ [SUCCESS] Triển khai thành công ${env.JOB_NAME} #${env.BUILD_NUMBER}!\nPhiên bản: ${IMAGE_TAG}\nChi tiết: ${env.BUILD_URL}")
         }
         failure {
             echo "Pipeline #${BUILD_NUMBER} FAILED — ${BUILD_URL}console"
+            
+            // [NÂNG CẤP]: Gửi Alert khi Thất bại (Màu đỏ)
+            // Tùy chọn 1: Dùng Email (Cần cài Mailer Plugin)
+            // mail to: 'devsecops-team@yourdomain.com',
+            //      subject: "🚨 BÁO ĐỘNG ĐỎ: Pipeline ${env.JOB_NAME} thất bại!",
+            //      body: "Pipeline ${env.JOB_NAME} [${env.BUILD_NUMBER}] đã thất bại trong quá trình build/deploy. Vui lòng kiểm tra log ngay: ${env.BUILD_URL}console"
+
+            // Tùy chọn 2: Dùng Slack (Khuyên dùng)
+            // slackSend(color: 'danger', message: "🚨 *BÁO ĐỘNG ĐỎ*: Pipeline *${env.JOB_NAME}* [#${env.BUILD_NUMBER}] đã THẤT BẠI!\nVui lòng kiểm tra ngay: ${env.BUILD_URL}console")
         }
         unstable {
             echo "Pipeline #${BUILD_NUMBER} UNSTABLE"
+            // slackSend(color: 'warning', message: "⚠️ [WARNING] Pipeline ${env.JOB_NAME} [#${env.BUILD_NUMBER}] không ổn định (Unstable).")
         }
     }
 }

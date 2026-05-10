@@ -105,8 +105,8 @@ function _M.run(ctx)
     local ua_lower = ua:lower()
 
     -- ── L1 CACHE (FIX 7: Tối ưu CPU, không quét lại UA đã phân loại) ──────
-    -- Tái sử dụng ip_cache đã có sẵn trong nginx.conf để lưu trạng thái UA
-    local cache = ngx.shared.ip_cache 
+    -- [FIX KIẾN TRÚC]: Tách riêng ua_cache để không giành RAM với ip_cache của Blacklist
+    local cache = ngx.shared.ua_cache 
     local cache_key = "ua:" .. ngx.md5(ua_lower)
 
     if cache then
@@ -145,8 +145,9 @@ function _M.run(ctx)
     -- ── WHITELIST ─────────────────────────────────────────────
     if contains_any(ua_lower, WHITELIST) then
         ctx.security.ua_whitelisted = true
-        -- FIX 2: Ghi log khi Whitelist để audit, đề phòng attacker fake UA "googlebot"
-        ngx.log(ngx.INFO, "[BAD_BOT] Whitelisted ua=", ua:sub(1, MAX_UA_LOG), " ip=", ip)
+        -- Tắt hoàn toàn log INFO cho Whitelist để giữ sạch file error.log
+        -- (Ngăn chặn spam log do bot thay đổi version/timestamp liên tục gây cache miss)
+        -- ngx.log(ngx.INFO, "[BAD_BOT] Whitelisted ua=", ua:sub(1, MAX_UA_LOG), " ip=", ip)
         if cache then cache:set(cache_key, "whitelist", 3600) end
         return
     end

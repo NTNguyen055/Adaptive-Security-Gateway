@@ -25,7 +25,6 @@ services:
       redis:
         condition: service_healthy
 
-  # FIX: Đổi từ 'curl' sang 'python urllib' vì Image Django đã được tối ưu gỡ bỏ curl
     healthcheck:
       test: 
         - "CMD-SHELL"
@@ -35,16 +34,15 @@ services:
       retries: 3
       start_period: 30s
       
-    # FIX 2: Bỏ collectstatic để tăng tốc độ boot. Chỉ giữ lại migrate và Gunicorn.
+    # [FIX CẤU HÌNH]: Dùng $$ để shell trong container tự động đọc biến từ Dockerfile hoặc .env
     command: >
       sh -c "
-      python manage.py collectstatic --noinput &&
       python manage.py migrate --noinput &&
       gunicorn docappsystem.wsgi:application 
       --bind 0.0.0.0:8000 
-      --workers 2 
-      --threads 2 
-      --timeout 60 
+      --workers $${GUNICORN_WORKERS:-2} 
+      --threads $${GUNICORN_THREADS:-2} 
+      --timeout $${GUNICORN_TIMEOUT:-60} 
       --max-requests 1000 
       --max-requests-jitter 100 
       --access-logfile - 
@@ -69,9 +67,8 @@ services:
     networks:
       - internal
 
-
   # ===========================================================================
-  # REDIS
+  # REDIS (In-Memory Only)
   # ===========================================================================
   redis:
     image: redis:7-alpine
@@ -91,9 +88,6 @@ services:
       --timeout 300
       --loglevel warning
 
-    volumes:
-      - redis_data:/data
-
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -111,7 +105,6 @@ services:
 
     networks:
       - internal
-
 
   # ===========================================================================
   # OPENRESTY GATEWAY
@@ -158,17 +151,9 @@ services:
     networks:
       - internal
 
-
-# =============================================================================
-# NETWORKS & VOLUMES
-# =============================================================================
 networks:
   internal:
     driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/24
-
-volumes:
-  redis_data:
-    driver: local

@@ -5,6 +5,10 @@ local re_find  = ngx.re.find
 local re_match = ngx.re.match
 local math_min = math.min
 
+-- [FIX NHẤT QUÁN CODEBASE]: Nạp thư viện SHA256 đã có sẵn trong vendor
+local resty_sha256 = require "resty.sha256"
+local str          = require "resty.string"
+
 local function get_libs()
     return require "resty.jwt"
 end
@@ -116,8 +120,12 @@ function _M.run(ctx)
     local token   = m[1]
     local jwt_lib = get_libs()
     
-    -- Băm chuỗi siêu tốc bằng MD5 nội tại thay vì phân bổ object SHA256
-    local token_hash = ngx.md5(token)
+    -- [FIX NHẤT QUÁN CODEBASE]: Sử dụng SHA-256 thay cho MD5 để chuẩn hóa bảo mật
+    local sha256 = resty_sha256:new()
+    sha256:update(token)
+    local digest = sha256:final()
+    local token_hash = str.to_hex(digest)
+    
     local cache      = ngx.shared.jwt_cache
 
     -- ── L1 CACHE HIT ─────────────────────────────────────────

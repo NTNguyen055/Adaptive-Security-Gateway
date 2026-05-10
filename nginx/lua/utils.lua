@@ -18,15 +18,35 @@ function _M.is_valid_ipv4(ip)
     return false
 end
 
--- ── Kiểm tra IPv6 hợp lệ (Chống bypass bằng ký tự ":") ────────────────
+-- ── Kiểm tra IPv6 hợp lệ (Bao phủ Edge Cases) ─────────────────────────
 function _M.is_valid_ipv6(ip)
     if not ip or #ip < 2 or #ip > 45 then return false end
     
     -- Loại bỏ dấu ngoặc vuông nếu có (Ví dụ: [::1])
     ip = ip:match("^%[(.+)%]$") or ip
+    
+    -- [FIX THEO REVIEW]: Bắt nhanh trường hợp all-zeros shorthand
+    if ip == "::" then return true end
+
+    -- [FIX THEO REVIEW]: Xử lý IPv4-mapped IPv6 (Ví dụ: ::ffff:192.168.1.1)
+    local ipv4_part = ip:match(":(%d+%.%d+%.%d+%.%d+)$")
+    if ipv4_part then
+        -- Nếu phần đuôi không phải IPv4 hợp lệ -> Sai
+        if not _M.is_valid_ipv4(ipv4_part) then return false end
+        -- Cắt phần IPv4 đi, chỉ giữ lại phần prefix IPv6 (Ví dụ: "::ffff:") để check tiếp
+        ip = ip:sub(1, -(#ipv4_part + 1))
+    end
+
     local _, colons = ip:gsub(":", "")
     
-    return colons >= 2 and colons <= 7 and not ip:match("[^0-9a-fA-F:]")
+    -- Phải có từ 2 đến 7 dấu hai chấm
+    if colons < 2 or colons > 7 then return false end
+    
+    -- Chặn 3 dấu hai chấm liên tiếp (chuỗi rác :::)
+    if ip:find(":::", 1, true) then return false end
+    
+    -- Không được chứa ký tự lạ (Lúc này dấu '.' của IPv4 đã bị cắt ở trên)
+    return not ip:match("[^0-9a-fA-F:]")
 end
 
 -- ── Kiểm tra IP hợp lệ (Gom chung IPv4 và IPv6) ───────────────────────

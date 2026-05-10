@@ -1,9 +1,4 @@
 # =============================================================================
-# Adaptive Web Security Gateway — Django App Dockerfile
-# Multi-stage build: builder (compile wheels) → runtime (lean image)
-# =============================================================================
-
-# =============================================================================
 # STAGE 1: Builder — compile Python wheels
 # =============================================================================
 FROM python:3.12-slim AS builder
@@ -36,6 +31,17 @@ RUN pip install --upgrade pip \
 FROM python:3.12-slim AS runtime
 
 WORKDIR /app
+
+ARG BUILD_DATE
+ARG COMMIT_SHA
+ARG VERSION
+
+LABEL org.opencontainers.image.title="API Security App" \
+      org.opencontainers.image.description="Django Backend Application" \
+      org.opencontainers.image.authors="NTNguyen055" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${COMMIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
 
 # FIX 2: Bỏ PYTHONOPTIMIZE=1 để tránh lỗi ngầm nếu code (hoặc thư viện) dùng lệnh assert
 ENV DEBIAN_FRONTEND=noninteractive \

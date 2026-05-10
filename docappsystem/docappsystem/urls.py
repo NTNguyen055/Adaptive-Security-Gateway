@@ -7,6 +7,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db import connection, transaction
 from django.views.generic import RedirectView
 
+from django.core.cache import cache
+
 # Import thư viện auth mặc định của Django để dùng hàm Logout
 from django.contrib.auth import views as auth_views
 
@@ -38,7 +40,6 @@ def health_check(request):
 
     # Kiểm tra Redis cache
     try:
-        from django.core.cache import cache
         cache.set("_health_ping", "1", timeout=5)
         val = cache.get("_health_ping")
         checks["cache"] = "ok" if val == "1" else "miss"
@@ -99,10 +100,9 @@ urlpatterns = [
 
     # ── DJANGO ADMIN ─────────────────────────────────────────
     # /admin/ được nginx.conf xử lý với security pipeline riêng (Hardened)
-    path("admin/", admin.site.urls),
+    path("sys-admin-panel/", admin.site.urls),
 
     # ── CUSTOM ADMIN PANEL ───────────────────────────────────
-    # FIX: Sửa thành ADMINHOME viết hoa
     path("admin/",
          adminviews.ADMINHOME, name="admin_home"),
 

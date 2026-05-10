@@ -1,10 +1,22 @@
 FROM openresty/openresty:alpine-fat
 
+# [FIX THEO REVIEW]: Thêm chuẩn OCI Labels để dễ dàng truy vết (Traceability)
+ARG BUILD_DATE
+ARG COMMIT_SHA
+ARG VERSION
+
+LABEL org.opencontainers.image.title="API Security Gateway" \
+      org.opencontainers.image.description="OpenResty WAF & Security Gateway" \
+      org.opencontainers.image.authors="NTNguyen055" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${COMMIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
+
 # ================= BASE =================
+# [DF-2] FIX: Đã gỡ bỏ libmaxminddb-dev khỏi runtime image để giảm dung lượng và tăng bảo mật
 RUN apk add --no-cache \
     ca-certificates \
     libmaxminddb \
-    libmaxminddb-dev \
     tzdata \
     openssl \
     curl \
