@@ -13,10 +13,11 @@ LABEL org.opencontainers.image.title="API Security Gateway" \
       org.opencontainers.image.version="${VERSION}"
 
 # ================= BASE =================
-# [DF-2] FIX: Đã gỡ bỏ libmaxminddb-dev khỏi runtime image để giảm dung lượng và tăng bảo mật
+# Cài đặt lại libmaxminddb-dev để cung cấp file libmaxminddb.so cho Lua FFI
 RUN apk add --no-cache \
     ca-certificates \
     libmaxminddb \
+    libmaxminddb-dev \
     tzdata \
     openssl \
     curl \
