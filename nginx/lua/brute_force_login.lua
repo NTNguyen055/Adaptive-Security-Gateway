@@ -87,6 +87,11 @@ local function track_persistent_attempt(ip, attempt_count, red)
     ngx.log(ngx.DEBUG, "[BRUTE_FORCE] History tracked for IP ", ip, 
             " - entry: ", new_entry)
 end
+
+-- ============================================================
+-- HELPER: KIỂM TRA IP BỊ LOCKOUT (Cooldown)
+-- ============================================================
+local function is_ip_locked(ip, ctx)
     local cfg = get_config()
     local red, err = redis_helper.get_redis(0)
     
