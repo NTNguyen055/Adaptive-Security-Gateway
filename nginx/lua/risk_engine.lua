@@ -99,6 +99,33 @@ function _M.run(ctx)
     -- FIX 2: Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
     local final_risk = math_min(reputation * DECAY_FACTOR + base_risk, MAX_RISK)
 
+    -- =========================================================================
+    -- [NEW] BRUTE-FORCE REPUTATION TRACKING
+    -- Kiểm tra lịch sử brute-force để accumulate risk across windows
+    -- =========================================================================
+    local bf_history_key = "brute_force:history:" .. ip
+    local bf_history = red:get(bf_history_key)
+    
+    if bf_history and bf_history ~= ngx.null then
+        -- Parse history và count high-risk attempts
+        local high_risk_count = 0
+        for entry in bf_history:gmatch("[^,]+") do
+            local _, attempt = entry:match("^([^:]+):(%d+)$")
+            if attempt and tonumber(attempt) >= 5 then
+                high_risk_count = high_risk_count + 1
+            end
+        end
+        
+        -- Nếu có lịch sử brute-force >= 5 lần, tăng penalty thêm
+        if high_risk_count > 0 then
+            local persistent_penalty = high_risk_count * 15
+            final_risk = math_min(final_risk + persistent_penalty, MAX_RISK)
+            ngx.log(ngx.WARN, "[RISK] Brute-force history detected for IP ", ip,
+                    " - high_risk_count=", high_risk_count, 
+                    " - additional_penalty=", persistent_penalty)
+        end
+    end
+
     -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
     -- FIX 7: Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
     if base_risk > 50 then

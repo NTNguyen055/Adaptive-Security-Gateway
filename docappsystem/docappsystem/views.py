@@ -5,8 +5,39 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from dasapp.models import CustomUser
 from django.contrib.auth import get_user_model
+import redis  # [NEW] Để kết nối Redis
 
 User = get_user_model()
+
+# [NEW] Helper function để ghi nhận brute-force từ Django
+def record_login_attempt(request, success=False):
+    """
+    Ghi nhận login attempt vào Redis để Nginx có thể tracking.
+    - Success: Ghi nhận timestamp thành công (NOT reset counter!)
+    - Failed: Ghi nhận attempt (Nginx sẽ làm việc này)
+    """
+    try:
+        client_ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', ''))
+        if ',' in client_ip:
+            client_ip = client_ip.split(',')[0].strip()
+        
+        r = redis.Redis(host='redis', port=6379, db=0, socket_connect_timeout=2, socket_timeout=2)
+        
+        if success:
+            # [FIXED] Không xóa counter nữa!
+            # Chỉ ghi nhận success time để tracking
+            success_key = f"brute_force:success:{client_ip}"
+            r.set(success_key, "1", ex=900)  # TTL = 15 phút (BRUTE_FORCE_WINDOW)
+            print(f"[LOGIN_TRACKING] Login SUCCESS for IP {client_ip} - counter preserved")
+        else:
+            # Nginx sẽ xử lý ghi nhận failed attempt
+            pass
+            
+        r.close()
+    except Exception as e:
+        print(f"[LOGIN_TRACKING] Redis error: {e}")
+        pass
+
 def BASE(request):
     return render(request,'base.html')
 
@@ -20,27 +51,42 @@ def doLogout(request):
 
 def doLogin(request):
     if request.method == 'POST':
+        email = request.POST.get('email')
+        password = request.POST.get('password')
+        
         user = EmailBackEnd.authenticate(request,
-                                         username=request.POST.get('email'),
-                                         password=request.POST.get('password')
+                                         username=email,
+                                         password=password
                                          )
         if user!=None:
             login(request,user)
-            user_type = user.user_type
-            if user_type == '1':
-                 return redirect('admin_home')
-            elif user_type == '2':
-                 return redirect('doctor_home')
-            elif user_type == '3':
-                return HttpResponse("This is User panel")
+            record_login_attempt(request, success=True)  # [NEW] Clear brute-force counter
             
+            user_type = user.user_type
+            response = None
+            if user_type == '1':
+                 response = redirect('admin_home')
+            elif user_type == '2':
+                 response = redirect('doctor_home')
+            elif user_type == '3':
+                response = HttpResponse("This is User panel")
+            
+            # [NEW] Set header để Nginx biết login thành công
+            if response:
+                response['X-Login-Status'] = 'success'
+            return response
             
         else:
                 messages.error(request,'Email or Password is not valid')
-                return redirect('login')
+                resp = redirect('login')
+                # [NEW] Set header để Nginx biết login thất bại
+                resp['X-Login-Status'] = 'failed'
+                return resp
     else:
             messages.error(request,'Email or Password is not valid')
-            return redirect('login')
+            resp = redirect('login')
+            resp['X-Login-Status'] = 'failed'
+            return resp
 
 
 login_required(login_url='/')
