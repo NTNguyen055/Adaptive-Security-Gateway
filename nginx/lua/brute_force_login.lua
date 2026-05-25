@@ -2,7 +2,7 @@
 -- File: nginx/lua/brute_force_login.lua
 -- Chức năng: Chống Brute-force Login thông minh
 -- - Theo dõi failed login attempts per IP
--- - Phạt Risk Score cho những IP vượt ngưỡng 5 lần sai mật khẩu trong vòng 15 phút
+-- - Phạt Risk Score cho những IP vượt ngưỡng 5 lần sai mật khẩu trong vòng 5 phút
 -- - Trả về 429/403 tùy theo mức độ Risk
 -- =============================================================================
 
@@ -19,10 +19,53 @@ local math = math
 local function get_config()
     return {
         max_attempts = tonumber(os.getenv("BRUTE_FORCE_MAX_ATTEMPTS")) or 5,
-        window_time = tonumber(os.getenv("BRUTE_FORCE_WINDOW")) or 900,       -- 15 phút
-        risk_penalty = tonumber(os.getenv("BRUTE_FORCE_RISK_PENALTY")) or 40, -- +40 điểm risk
+        window_time = tonumber(os.getenv("BRUTE_FORCE_WINDOW")) or 300,       -- 5 phút
+        risk_penalty = tonumber(os.getenv("BRUTE_FORCE_RISK_PENALTY")) or 80, -- +80 điểm risk
         cooldown_time = tonumber(os.getenv("BRUTE_FORCE_COOLDOWN")) or 3600,  -- 1 giờ lockout
     }
+end
+
+-- ============================================================
+-- HELPER: UPDATE RISK REPUTATION THÊM VÀO REDIS
+-- ============================================================
+local function add_risk_reputation(ip, amount, red)
+    if not ip or not amount then
+        return
+    end
+
+    amount = tonumber(amount) or 0
+    if amount <= 0 then
+        return
+    end
+
+    local key = "risk:v1:" .. ip
+    local current = 0
+    local existing = red:get(key)
+    if existing and existing ~= ngx.null then
+        current = tonumber(existing) or 0
+    end
+
+    local new_score = math.min(current + amount, 100)
+    red:set(key, string.format("%.2f", new_score), "EX", 86400)
+    ngx.log(ngx.WARN, "[BRUTE_FORCE] Risk reputation updated for IP ", ip, ": ", current, " -> ", new_score)
+end
+
+-- ============================================================
+-- HELPER: THÊM IP VÀO BLACKLIST TEMPORARY
+-- ============================================================
+local function add_ip_to_blacklist(ip, red)
+    if not ip or not red then
+        return
+    end
+
+    local blacklist_key = "blacklist:" .. ip
+    red:set(blacklist_key, "1", "EX", get_config().cooldown_time)
+
+    if ngx.shared.ip_cache then
+        ngx.shared.ip_cache:set("bl:" .. ip, 1, math.min(get_config().cooldown_time, 60))
+    end
+
+    ngx.log(ngx.WARN, "[BRUTE_FORCE] IP " .. ip .. " added to blacklist for " .. tostring(get_config().cooldown_time) .. "s")
 end
 
 -- ============================================================
@@ -194,9 +237,10 @@ function _M.record_failed_attempt(ctx)
                 " - +", risk_penalty, " risk points")
                 
     elseif tonumber(attempt_count) >= cfg.max_attempts then
-        -- Lần 5+: Phạt +40 risk điểm + Lockout
+        -- Lần 5+: Phạt +80 risk điểm + Lockout ngay lập tức
         ctx.brute_force.action = "block"
         ctx.brute_force.exceed = true
+        ctx.brute_force.block_now = true
         
         local risk_penalty = cfg.risk_penalty
         ctx.security = ctx.security or {}
@@ -207,6 +251,12 @@ function _M.record_failed_attempt(ctx)
         -- Set cooldown lockout
         local lockout_key = "brute_force:lockout:" .. ip
         red:set(lockout_key, "1", "EX", cfg.cooldown_time)
+
+        -- Thêm IP vào blacklist tạm thời để các module blacklist bắt được ngay
+        add_ip_to_blacklist(ip, red)
+
+        -- Cập nhật risk reputation để những request sau cũng chịu ảnh hưởng
+        add_risk_reputation(ip, risk_penalty, red)
 
         ngx.log(ngx.ALERT, "[BRUTE_FORCE] IP ", ip, 
                 " exceeded max attempts! Penalizing +", risk_penalty, 
