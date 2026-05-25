@@ -60,20 +60,22 @@ def doLogin(request):
                                          )
         if user!=None:
             login(request,user)
-            record_login_attempt(request, success=True)  # [NEW] Clear brute-force counter
-            
+            record_login_attempt(request, success=True)  # [NEW] Ghi nhận success
+
             user_type = user.user_type
-            response = None
+            
+            # Khởi tạo mặc định để chống lỗi 500 nếu user_type bị sai lệch
+            response = redirect('login') 
+
             if user_type == '1':
                  response = redirect('admin_home')
             elif user_type == '2':
                  response = redirect('doctor_home')
             elif user_type == '3':
-                response = HttpResponse("This is User panel")
+                 response = HttpResponse("This is User panel")
             
-            # [NEW] Set header để Nginx biết login thành công
-            if response:
-                response['X-Login-Status'] = 'success'
+            # Không cần if response nữa vì chắc chắn response luôn là một HttpResponse
+            response['X-Login-Status'] = 'success'
             return response
             
         else:
