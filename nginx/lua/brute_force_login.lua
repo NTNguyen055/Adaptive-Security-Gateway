@@ -163,7 +163,7 @@ end
 -- ============================================================
 function _M.record_failed_attempt(ctx)
     local cfg = get_config()
-    local ip = ctx.client_ip or ngx.var.remote_addr or ngx.var.realip_remote_addr
+    local ip = ctx.client_ip or ngx.var.realip_remote_addr or ngx.var.remote_addr
     
     -- Kiểm tra IP bị lockout
     if is_ip_locked(ip, ctx) then
@@ -274,7 +274,7 @@ end
 -- [FIX] Không reset counter ngay! Chỉ đánh dấu "success" để tracking
 -- ============================================================
 function _M.record_successful_login(ctx)
-    local ip = ctx.client_ip or ngx.var.remote_addr or ngx.var.realip_remote_addr
+    local ip = ctx.client_ip or ngx.var.realip_remote_addr or ngx.var.remote_addr
     
     local red, err = redis_helper.get_redis(0)
     if not red then
@@ -310,7 +310,7 @@ end
 -- CHECK: SỰ KIỆN PRE-LOGIN (Trước khi người dùng gửi form)
 -- ============================================================
 function _M.check_prelogin(ctx)
-    local ip = ctx.client_ip or ngx.var.remote_addr or ngx.var.realip_remote_addr
+    local ip = ctx.client_ip or ngx.var.realip_remote_addr or ngx.var.remote_addr
     
     -- Kiểm tra xem IP có đang bị lockout không
     if is_ip_locked(ip, ctx) then
