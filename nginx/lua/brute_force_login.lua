@@ -46,8 +46,13 @@ local function add_risk_reputation(ip, amount, red)
     end
 
     local new_score = math.min(current + amount, 100)
-    red:set(key, string.format("%.2f", new_score), "EX", 86400)
-    ngx.log(ngx.WARN, "[BRUTE_FORCE] Risk reputation updated for IP ", ip, ": ", current, " -> ", new_score)
+    -- [CRITICAL FIX] Khi score >= 80, set TTL = 1 năm (vĩnh viễn block)
+    local ttl = 86400  -- Mặc định 24 giờ
+    if new_score >= 80 then
+        ttl = 31536000  -- 1 năm = block vĩnh viễn, admin phải xóa thủ công
+    end
+    red:set(key, string.format("%.2f", new_score), "EX", ttl)
+    ngx.log(ngx.WARN, "[BRUTE_FORCE] Risk reputation updated for IP ", ip, ": ", current, " -> ", new_score, " (TTL=", ttl, "s)")
 end
 
 -- ============================================================
@@ -59,13 +64,15 @@ local function add_ip_to_blacklist(ip, red)
     end
 
     local blacklist_key = "blacklist:" .. ip
-    red:set(blacklist_key, "1", "EX", get_config().cooldown_time)
+    -- [CRITICAL FIX] Khi brute-force block, blacklist = vĩnh viễn (1 năm)
+    local bl_ttl = 31536000  -- 1 năm = vĩnh viễn block
+    red:set(blacklist_key, "1", "EX", bl_ttl)
 
     if ngx.shared.ip_cache then
-        ngx.shared.ip_cache:set("bl:" .. ip, 1, math.min(get_config().cooldown_time, 60))
+        ngx.shared.ip_cache:set("bl:" .. ip, 1, math.min(bl_ttl, 3600))
     end
 
-    ngx.log(ngx.WARN, "[BRUTE_FORCE] IP " .. ip .. " added to blacklist for " .. tostring(get_config().cooldown_time) .. "s")
+    ngx.log(ngx.WARN, "[BRUTE_FORCE] IP " .. ip .. " added to PERMANENT blacklist (" .. tostring(bl_ttl) .. "s - 1 year)")
 end
 
 -- ============================================================
@@ -101,15 +108,14 @@ end
 -- ============================================================
 local function track_persistent_attempt(ip, attempt_count, red)
     local cfg = get_config()
-    
-    -- Key dành riêng cho tracking lịch sử (never auto-expire)
     local history_key = "brute_force:history:" .. ip
     
-    -- Lưu event này: timestamp + attempt_count
-    -- Format: "timestamp:5,timestamp:4,timestamp:3"
-    local history = red:get(history_key) or ""
+    -- [FIX LỖI CHÍ MẠNG]: Xử lý an toàn biến ngx.null của Redis
+    local history = red:get(history_key)
+    if not history or history == ngx.null then
+        history = ""
+    end
     
-    -- Chỉ lưu top 10 attempts gần nhất
     local new_entry = ngx.now() .. ":" .. attempt_count
     if history == "" then
         history = new_entry
@@ -237,7 +243,7 @@ function _M.record_failed_attempt(ctx)
                 " - +", risk_penalty, " risk points")
                 
     elseif tonumber(attempt_count) >= cfg.max_attempts then
-        -- Lần 5+: Phạt +80 risk điểm + Lockout ngay lập tức
+        -- Lần 5+: Phạt +80 risk điểm + Lockout vĩnh viễn
         ctx.brute_force.action = "block"
         ctx.brute_force.exceed = true
         ctx.brute_force.block_now = true
@@ -248,9 +254,10 @@ function _M.record_failed_attempt(ctx)
         ctx.security.signals = ctx.security.signals or {}
         table.insert(ctx.security.signals, "brute_force_attempt:" .. attempt_count)
 
-        -- Set cooldown lockout
+        -- [CRITICAL FIX] Set cooldown lockout = 1 năm (vĩnh viễn block)
         local lockout_key = "brute_force:lockout:" .. ip
-        red:set(lockout_key, "1", "EX", cfg.cooldown_time)
+        local permanent_ttl = 31536000  -- 1 năm
+        red:set(lockout_key, "1", "EX", permanent_ttl)
 
         -- Thêm IP vào blacklist tạm thời để các module blacklist bắt được ngay
         add_ip_to_blacklist(ip, red)
@@ -259,8 +266,8 @@ function _M.record_failed_attempt(ctx)
         add_risk_reputation(ip, risk_penalty, red)
 
         ngx.log(ngx.ALERT, "[BRUTE_FORCE] IP ", ip, 
-                " exceeded max attempts! Penalizing +", risk_penalty, 
-                " risk points. Lockout for ", cfg.cooldown_time, "s")
+                " exceeded max attempts! PERMANENT BAN applied (+", risk_penalty, 
+                " risk points). Lockout for ", permanent_ttl, "s (1 year)")
     else
         ctx.brute_force.action = "pass"
     end

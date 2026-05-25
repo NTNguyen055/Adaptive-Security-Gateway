@@ -112,7 +112,7 @@ function _M.run(ctx)
     if count_ip > limit_global or count_ip_uri > limit_uri then
         ctx.security.redis_rate_exceeded = true
         ctx.security.block               = true   
-        ctx.security.risk                = math_min((ctx.security.risk or 0) + 20, 100)
+        ctx.security.risk                = math_min((ctx.security.risk or 0) + 80, 100)
 
         table.insert(ctx.security.signals, "redis_rate_exceeded")
         ngx.log(ngx.WARN, "[REDIS_RL] EXCEEDED ip=", ip, " count_ip=", count_ip, "/", limit_global, " count_uri=", count_ip_uri, "/", limit_uri)

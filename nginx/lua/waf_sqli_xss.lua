@@ -96,7 +96,7 @@ local function check(value, ctx, source)
     if re_find(v, SQLI_PATTERN, "ijo") then
         ctx.security.waf_sqli = true
         ctx.security.block    = true   
-        local base = 60
+        local base = 80
         if ctx.security.bad_bot_scanner then base = math_min(base + 20, 100) end
         ctx.security.risk = math_min((ctx.security.risk or 0) + base, 100)
         table.insert(ctx.security.signals, "waf_sqli")
@@ -112,7 +112,7 @@ local function check(value, ctx, source)
     if re_find(v, XSS_PATTERN, "ijo") then
         ctx.security.waf_xss = true
         ctx.security.block   = true   
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 60, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "waf_xss")
 
         local ip = (ctx.security and ctx.security.client_ip) or ngx.var.remote_addr

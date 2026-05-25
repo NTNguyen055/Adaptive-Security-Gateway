@@ -129,6 +129,8 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/www/html:/var/www/html:ro
       - ./logs/nginx:/usr/local/openresty/nginx/logs
+      - ./nginx/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./nginx/lua:/usr/local/openresty/nginx/lua:ro
 
     depends_on:
       app:

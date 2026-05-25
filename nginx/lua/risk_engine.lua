@@ -97,7 +97,16 @@ function _M.run(ctx)
     reputation = (reputation and reputation ~= ngx.null) and tonumber(reputation) or 0
 
     -- FIX 2: Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
-    local final_risk = math_min(reputation * DECAY_FACTOR + base_risk, MAX_RISK)
+    -- [CRITICAL FIX v2] Không decay - chỉ cộng thêm signal mới
+    -- Nếu request sạch (base_risk = 0), giữ nguyên reputation
+    -- Nếu có signal mới, cộng thêm vào reputation
+    local final_risk = math_min(reputation + base_risk, MAX_RISK)
+    
+    -- Nếu đã permanent ban (reputation >= 80), giữ nguyên 80 (không nhân bất kỳ hệ số)
+    if reputation >= cfg.block_threshold then
+        final_risk = reputation
+        ngx.log(ngx.WARN, "[RISK] PERMANENT_BAN detected for IP ", ip, " - reputation=", reputation, " (no decay, no forgiveness)")
+    end
 
     -- =========================================================================
     -- [NEW] BRUTE-FORCE REPUTATION TRACKING
@@ -128,15 +137,15 @@ function _M.run(ctx)
 
     -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
     -- FIX 7: Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
-    if base_risk > 50 then
+    -- [CRITICAL FIX] Nhưng nếu reputation >= 80 (permanent ban), không thêm điểm nữa
+    if base_risk > 50 and reputation < cfg.block_threshold then
         final_risk = math_min(final_risk + 10, MAX_RISK)
     end
 
-    -- Forgiveness: "Khoan hồng" cho IP gửi request sạch
-    -- FIX 8: Chỉ giảm điểm nhanh nếu IP đó chưa từng bị gắn mác "Tội phạm" (Attacker)
-    if base_risk < 10 and reputation < cfg.block_threshold then
-        final_risk = final_risk * 0.8
-    end
+    -- [CRITICAL FIX v2] NO FORGIVENESS - Giữ nguyên điểm forever
+    -- Không bao giờ giảm điểm dù là 0.8x hay bất kỳ hệ số nào
+    -- IP càng nguy hiểm bị nhớ càng lâu, không có khoan hồng tự động
+    -- final_risk được tính từ reputation + base_risk, giữ nguyên không nhân hệ số
 
     -- =========================================================================
     -- [FIX HIỆU NĂNG - ENTERPRISE STANDARD]: TỐI ƯU HÓA REDIS WRITE I/O
@@ -148,9 +157,10 @@ function _M.run(ctx)
     if final_risk >= 0.01 or reputation >= 0.01 then
         
         -- FIX 4: Trừng phạt theo cấp độ - Kẻ càng nguy hiểm bị nhớ càng lâu
+        -- [CRITICAL FIX] Khi block (>= 80), TTL = 1 năm (vĩnh viễn block)
         local rep_ttl = 3600 -- Mặc định 1 giờ
         if final_risk >= cfg.block_threshold then
-            rep_ttl = 86400  -- Bị Block: Ghi nhớ 24 giờ
+            rep_ttl = 31536000  -- Bị Block: Ghi nhớ 1 năm (vĩnh viễn) - Admin phải xóa thủ công
         elseif final_risk >= cfg.limit_threshold then
             rep_ttl = 7200   -- Bị Limit: Ghi nhớ 2 giờ
         end

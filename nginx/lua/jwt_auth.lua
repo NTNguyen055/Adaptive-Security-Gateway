@@ -88,7 +88,7 @@ function _M.run(ctx)
         ctx.security.jwt_missing = true
         ctx.security.block       = true
 
-        local base = 20
+        local base = 80
         if ctx.security.rate_limit_hard  then base = math_min(base + 10, 100) end
         if ctx.security.waf_sqli or ctx.security.waf_xss then
             base = math_min(base + 15, 100)
@@ -111,7 +111,7 @@ function _M.run(ctx)
     if not m then
         ctx.security.jwt_malformed = true
         ctx.security.block         = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 30, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_malformed")
         ngx.log(ngx.WARN, "[JWT] Malformed header ip=", ip)
         return
@@ -145,7 +145,7 @@ function _M.run(ctx)
         if cached_val == 2 then
             ctx.security.jwt_invalid = true
             ctx.security.block       = true
-            ctx.security.risk        = math_min((ctx.security.risk or 0) + 40, 100)
+            ctx.security.risk        = math_min((ctx.security.risk or 0) + 80, 100)
             table.insert(ctx.security.signals, "jwt_blocked_cache")
             return
         end
@@ -157,7 +157,7 @@ function _M.run(ctx)
     if not jwt_obj or not jwt_obj.valid then
         ctx.security.jwt_malformed = true
         ctx.security.block         = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 30, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_malformed")
         if cache then cache:set(token_hash, 2, INVALID_TTL) end
         return
@@ -180,7 +180,7 @@ function _M.run(ctx)
     if not jwt_obj or not jwt_obj.verified then
         ctx.security.jwt_invalid = true
         ctx.security.block       = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 50, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_invalid")
         ngx.log(ngx.WARN, "[JWT] Invalid signature ip=", ip, " reason=", tostring(jwt_obj and jwt_obj.reason))
         if cache then cache:set(token_hash, 2, INVALID_TTL) end
@@ -194,7 +194,7 @@ function _M.run(ctx)
     if not payload or type(payload.user_id) ~= "number" then
         ctx.security.jwt_payload_invalid = true
         ctx.security.block               = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 40, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_payload_invalid")
         return
     end
@@ -202,7 +202,7 @@ function _M.run(ctx)
     if not payload.exp then
         ctx.security.jwt_no_exp = true
         ctx.security.block      = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 40, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_no_exp")
         return
     end
@@ -212,7 +212,7 @@ function _M.run(ctx)
     if ttl <= 0 then
         ctx.security.jwt_expired = true
         ctx.security.block       = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 30, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_expired")
         ngx.log(ngx.WARN, "[JWT] Expired ip=", ip, " expired_ago=", math.abs(ttl), "s")
         return
@@ -222,7 +222,7 @@ function _M.run(ctx)
     if payload.nbf and payload.nbf > now then
         ctx.security.jwt_nbf = true
         ctx.security.block   = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 30, 100)
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_nbf")
         return
     end
@@ -231,7 +231,8 @@ function _M.run(ctx)
     -- Bắt những token có timestamp tạo ra ở tương lai (Dấu hiệu hacker tự bịa token)
     if payload.iat and payload.iat > now + 5 then
         ctx.security.jwt_iat_future = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 20, 100)
+        ctx.security.block = true
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_iat_future")
     end
 

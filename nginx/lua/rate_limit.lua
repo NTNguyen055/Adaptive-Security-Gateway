@@ -67,7 +67,7 @@ local function auto_blacklist(ip, ctx)
     end
 
     -- Bắn Async job lên Redis để thông báo cho các Worker khác (L2)
-    ngx.timer.at(0, function(premature, target_ip, duration)
+    ngx.timer.at(0, function(premature, target_ip, duration, risk_score)
         if premature then return end
 
         -- FIX 3: Sử dụng redis_helper để có timeout chuẩn và tự động chọn DB 0
@@ -78,12 +78,17 @@ local function auto_blacklist(ip, ctx)
         end
 
         local key = "blacklist:" .. target_ip
+        -- [CRITICAL FIX] Nếu risk_score >= 50, blacklist = vĩnh viễn (1 năm)
+        local final_ttl = duration
+        if risk_score and risk_score >= 50 then
+            final_ttl = 31536000  -- 1 năm = vĩnh viễn block
+        end
         red:set(key, "1")
-        red:expire(key, duration)
+        red:expire(key, final_ttl)
 
         redis_helper.close(red)
-        ngx.log(ngx.WARN, "[AUTO_BL] BLACKLISTED ip=", target_ip, " duration=", duration, "s")
-    end, ip, cfg.bl_duration)
+        ngx.log(ngx.WARN, "[AUTO_BL] BLACKLISTED ip=", target_ip, " duration=", final_ttl, "s (risk=", risk_score, ")")
+    end, ip, cfg.bl_duration, ctx.security.risk or 0)
 
     -- Xóa biến đếm để khỏi bị Trigger lặp lại
     counter_store:delete("rl:" .. ip)
@@ -114,7 +119,7 @@ function _M.run(ctx)
         if err == "rejected" then
             ctx.security.rate_limit_hard = true
             ctx.security.block           = true   
-            ctx.security.risk            = math_min((ctx.security.risk or 0) + 30, 100)
+            ctx.security.risk            = math_min((ctx.security.risk or 0) + 80, 100)
 
             table.insert(ctx.security.signals, "rate_limit_hard")
             ngx.log(ngx.WARN, "[RATE_LIMIT] HARD Block ip=", ip)
@@ -130,10 +135,12 @@ function _M.run(ctx)
     -- ── BURST (Vượt RPS nhưng chưa vượt ngưỡng Burst) ───────────
     if delay > 0 then
         ctx.security.rate_limit_burst = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 15, 100)
+        ctx.security.block = true
+        ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
 
         table.insert(ctx.security.signals, "rate_limit_burst")
-        ngx.log(ngx.WARN, "[RATE_LIMIT] BURST ip=", ip, " delay_ms=", string.format("%.0f", delay * 1000))
+        ngx.log(ngx.WARN, "[RATE_LIMIT] BURST Block ip=", ip, " delay_ms=", string.format("%.0f", delay * 1000))
+        auto_blacklist(ip, ctx)
         return
     end
 
