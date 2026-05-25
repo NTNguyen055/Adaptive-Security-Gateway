@@ -41,12 +41,10 @@ function _M.run(ctx)
                     if results and not pipe_err then
                         local manual_res = results[1]
                         local auto_res   = results[2]
-                        local is_blacklisted = (manual_res == 1)
-                                            or (auto_res and auto_res ~= ngx.null and tostring(auto_res) == "1")
+                        local is_key_blacklisted = auto_res and auto_res ~= ngx.null and tostring(auto_res) == "1"
+                        local is_set_blacklisted = manual_res == 1
 
-                        if not is_blacklisted then
-                            cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
-                        else
+                        if is_key_blacklisted then
                             ctx.security.ip_blacklisted = true
                             ctx.security.block          = true
                             ctx.security.risk           = 100
@@ -59,6 +57,22 @@ function _M.run(ctx)
                             end
                             return
                         end
+
+                        if is_set_blacklisted and not is_key_blacklisted then
+                            ngx.log(ngx.WARN, "[BLACKLIST] Stale blacklist membership detected for IP=", ip, " during cache revalidation")
+                            local cleanup_red, cleanup_err = redis_helper.get_redis(0)
+                            if cleanup_red then
+                                cleanup_red:srem("blacklist_ips", ip)
+                                redis_helper.close(cleanup_red)
+                            else
+                                ngx.log(ngx.ERR, "[BLACKLIST] Cleanup redis unavailable: ", cleanup_err)
+                            end
+                            cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
+                            return
+                        end
+
+                        cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
+                        return
                     else
                         ngx.log(ngx.ERR, "[BLACKLIST] Redis revalidation error: ", pipe_err)
                         ctx.security.ip_blacklisted = true
@@ -125,10 +139,10 @@ function _M.run(ctx)
     local auto_res   = results[2]
 
     -- [SỬA ĐỔI] Ép kiểu tostring() để đảm bảo an toàn với mọi giá trị lưu trên Redis
-    local is_blacklisted = (manual_res == 1) 
-                        or (auto_res and auto_res ~= ngx.null and tostring(auto_res) == "1")
+    local is_key_blacklisted = auto_res and auto_res ~= ngx.null and tostring(auto_res) == "1"
+    local is_set_blacklisted = manual_res == 1
 
-    if is_blacklisted then
+    if is_key_blacklisted then
         ngx.log(ngx.WARN, "[BLACKLIST] IP=", ip)
 
         -- Lưu cache với số 1 (blacklisted) kèm prefix bl:
@@ -146,6 +160,22 @@ function _M.run(ctx)
             metric_blocked:inc(1, {"ip_blacklist"})
         end
 
+        return
+    end
+
+    if is_set_blacklisted and not is_key_blacklisted then
+        ngx.log(ngx.WARN, "[BLACKLIST] Stale blacklist membership detected for IP=", ip, " during full redis check")
+        local cleanup_red, cleanup_err = redis_helper.get_redis(0)
+        if cleanup_red then
+            cleanup_red:srem("blacklist_ips", ip)
+            redis_helper.close(cleanup_red)
+        else
+            ngx.log(ngx.ERR, "[BLACKLIST] Cleanup redis unavailable: ", cleanup_err)
+        end
+
+        if cache then
+            cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
+        end
         return
     end
 
