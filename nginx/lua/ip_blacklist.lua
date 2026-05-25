@@ -29,15 +29,58 @@ function _M.run(ctx)
 
         if val ~= nil then
             if val == 1 then
-                ctx.security.ip_blacklisted = true
-                ctx.security.block          = true
-                ctx.security.risk           = 100
+                -- Revalidate với Redis để việc xóa blacklist bằng tay có tác dụng ngay.
+                local red, err = redis_helper.get_redis(0)
+                if red then
+                    red:init_pipeline()
+                    red:sismember("blacklist_ips", ip)
+                    red:get("blacklist:" .. ip)
+                    local results, pipe_err = red:commit_pipeline()
+                    redis_helper.close(red)
 
-                table.insert(ctx.security.signals, "ip_blacklist_cache")
-                ngx.log(ngx.WARN, "[BLACKLIST][CACHE] IP=", ip)
+                    if results and not pipe_err then
+                        local manual_res = results[1]
+                        local auto_res   = results[2]
+                        local is_blacklisted = (manual_res == 1)
+                                            or (auto_res and auto_res ~= ngx.null and tostring(auto_res) == "1")
 
-                if metric_blocked then
-                    metric_blocked:inc(1, {"ip_blacklist_cache"})
+                        if not is_blacklisted then
+                            cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
+                        else
+                            ctx.security.ip_blacklisted = true
+                            ctx.security.block          = true
+                            ctx.security.risk           = 100
+
+                            table.insert(ctx.security.signals, "ip_blacklist_cache")
+                            ngx.log(ngx.WARN, "[BLACKLIST][CACHE] IP=", ip)
+
+                            if metric_blocked then
+                                metric_blocked:inc(1, {"ip_blacklist_cache"})
+                            end
+                            return
+                        end
+                    else
+                        ngx.log(ngx.ERR, "[BLACKLIST] Redis revalidation error: ", pipe_err)
+                        ctx.security.ip_blacklisted = true
+                        ctx.security.block          = true
+                        ctx.security.risk           = 100
+
+                        table.insert(ctx.security.signals, "ip_blacklist_cache")
+                        if metric_blocked then
+                            metric_blocked:inc(1, {"ip_blacklist_cache"})
+                        end
+                        return
+                    end
+                else
+                    ctx.security.ip_blacklisted = true
+                    ctx.security.block          = true
+                    ctx.security.risk           = 100
+
+                    table.insert(ctx.security.signals, "ip_blacklist_cache")
+                    if metric_blocked then
+                        metric_blocked:inc(1, {"ip_blacklist_cache"})
+                    end
+                    return
                 end
             end
             -- Nếu val == 0 (IP sạch), không phát tín hiệu rác, trả về luôn

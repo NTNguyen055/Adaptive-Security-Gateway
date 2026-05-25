@@ -167,6 +167,14 @@ function _M.run(ctx)
 
         -- Ghi điểm Uy tín mới vào Redis
         red:set(key, string.format("%.2f", final_risk), "EX", rep_ttl)
+
+        -- [NEW FIX] Nếu block (final_risk >= 80), cũng thêm IP vào blacklist permanent
+        if final_risk >= cfg.block_threshold then
+            red:sadd("blacklist_ips", ip)
+            local bl_key = "blacklist:" .. ip
+            red:set(bl_key, "1", "EX", rep_ttl)
+            ngx.log(ngx.WARN, "[RISK] IP BLACKLISTED permanently ip=", ip, " final_risk=", string.format("%.1f", final_risk), " TTL=", rep_ttl, "s")
+        end
     end
     
     -- Luôn nhớ đóng kết nối Redis để trả về Pool, tránh tràn RAM
