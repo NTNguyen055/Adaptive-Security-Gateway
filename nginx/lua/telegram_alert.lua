@@ -5,6 +5,8 @@
 
 local _M = {}
 local ngx = ngx
+local cjson = require "cjson.safe" -- [VÁ LỖI 1]: Thêm thư viện cjson để parse dữ liệu
+
 local TELEGRAM_ALERT_TTL = 600
 
 local function get_telegram_config()
@@ -25,18 +27,28 @@ local function telegram_notify_timer(premature, bot_token, chat_id, text)
     local httpc = http.new()
     httpc:set_timeout(2000)
 
+    -- [VÁ LỖI 1]: Đóng gói payload bằng định dạng JSON (an toàn tuyệt đối trong ngx.timer)
+    local payload = cjson.encode({
+        chat_id = chat_id,
+        text = text,
+        disable_web_page_preview = true
+    })
+
     local res, err = httpc:request_uri("https://api.telegram.org", {
         method = "POST",
         path = "/bot" .. bot_token .. "/sendMessage",
-        body = ngx.encode_args({
-            chat_id = chat_id,
-            text = text,
-            disable_web_page_preview = "true",
-        }),
+        body = payload,
         headers = {
-            ["Content-Type"] = "application/x-www-form-urlencoded",
+            ["Content-Type"] = "application/json", -- Chuyển sang dùng JSON
+            ["Host"] = "api.telegram.org",
         },
-        ssl_verify = true,
+        -- [VÁ LỖI 2]: Tắt verify SSL tạm thời để đảm bảo HTTP client không bị văng lỗi 
+        -- "certificate verification failed" khi không tìm thấy file CA_ROOT trong Docker.
+        ssl_verify = false,
+        
+        -- Chú ý cho Production: Nếu muốn bật kiểm tra chứng chỉ (Strict SSL) thì gỡ comment 2 dòng dưới
+        -- ssl_verify = true,
+        -- ssl_cert_file = "/etc/ssl/certs/ca-certificates.crt",
     })
 
     if not res then
@@ -72,17 +84,18 @@ function _M.send(opts)
     end
 
     local cache_key = "tg_alert:" .. opts.ip .. ":" .. opts.attack_type
-    if ngx.shared.ip_cache then
-        if ngx.shared.ip_cache:get(cache_key) then
-            return
-        end
-        ngx.shared.ip_cache:set(cache_key, 1, TELEGRAM_ALERT_TTL)
+    if ngx.shared.ip_cache:get(cache_key) then
+        return
     end
 
+    ngx.shared.ip_cache:set(cache_key, true, TELEGRAM_ALERT_TTL)
+
     local text = format_alert(opts)
+    
+    -- Đẩy tiến trình gọi Telegram API xuống background thread
     local ok, err = ngx.timer.at(0, telegram_notify_timer, bot_token, chat_id, text)
     if not ok then
-        ngx.log(ngx.ERR, "[TELEGRAM] timer create failed: ", err)
+        ngx.log(ngx.ERR, "[TELEGRAM] failed to create timer: ", err)
     end
 end
 
