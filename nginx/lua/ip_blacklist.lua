@@ -1,6 +1,7 @@
 local _M = {}
 local math_min = math.min
 local redis_helper = require "redis_helper" -- [THÊM MỚI] Gọi module dùng chung
+local telegram_alert = require "telegram_alert"
 
 -- Giảm thời gian cache để việc gỡ ban (unban) thủ công có tác dụng nhanh hơn
 local CACHE_TTL_POSITIVE = 60 
@@ -51,6 +52,13 @@ function _M.run(ctx)
 
                             table.insert(ctx.security.signals, "ip_blacklist_cache")
                             ngx.log(ngx.WARN, "[BLACKLIST][CACHE] IP=", ip)
+                            telegram_alert.send({
+                                ip = ip,
+                                attack_type = "ip_blacklist_cache",
+                                score = 100,
+                                reason = "Blacklist cache hit",
+                                details = "Detected in shared ip_cache and revalidated against Redis"
+                            })
 
                             if metric_blocked then
                                 metric_blocked:inc(1, {"ip_blacklist_cache"})
@@ -155,6 +163,13 @@ function _M.run(ctx)
         ctx.security.risk           = 100
 
         table.insert(ctx.security.signals, "ip_blacklist")
+        telegram_alert.send({
+            ip = ip,
+            attack_type = "ip_blacklist",
+            score = 100,
+            reason = "Blacklist lookup",
+            details = "Detected in Redis blacklist"
+        })
 
         if metric_blocked then
             metric_blocked:inc(1, {"ip_blacklist"})

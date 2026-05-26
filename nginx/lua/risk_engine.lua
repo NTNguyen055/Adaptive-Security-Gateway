@@ -4,6 +4,7 @@ local ngx        = ngx
 local tonumber   = tonumber
 local math_min   = math.min
 local redis_helper = require "redis_helper" -- FIX 1: Tái sử dụng redis_helper.lua
+local telegram_alert = require "telegram_alert"
 
 -- ============================================================
 -- CONFIG
@@ -197,6 +198,13 @@ function _M.run(ctx)
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
         if metric_blocked then metric_blocked:inc(1, {"risk_block"}) end
         ctx.security.risk_action = "block"
+        telegram_alert.send({
+            ip = ip,
+            attack_type = "risk_engine",
+            score = final_risk,
+            reason = "Risk threshold exceeded",
+            details = "signals=" .. table.concat(signals, ",")
+        })
 
     elseif final_risk >= cfg.limit_threshold then
         ngx.log(ngx.WARN, "[RISK] LIMIT ip=", ip, " final=", string.format("%.1f", final_risk))
