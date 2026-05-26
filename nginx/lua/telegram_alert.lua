@@ -27,7 +27,6 @@ local function telegram_notify_timer(premature, bot_token, chat_id, text)
     local httpc = http.new()
     httpc:set_timeout(2000)
 
-    -- [VÁ LỖI 1]: Đóng gói payload bằng định dạng JSON (an toàn tuyệt đối trong ngx.timer)
     local payload = cjson.encode({
         chat_id = chat_id,
         text = text,
@@ -42,13 +41,7 @@ local function telegram_notify_timer(premature, bot_token, chat_id, text)
             ["Content-Type"] = "application/json", -- Chuyển sang dùng JSON
             ["Host"] = "api.telegram.org",
         },
-        -- [VÁ LỖI 2]: Tắt verify SSL tạm thời để đảm bảo HTTP client không bị văng lỗi 
-        -- "certificate verification failed" khi không tìm thấy file CA_ROOT trong Docker.
         ssl_verify = false,
-        
-        -- Chú ý cho Production: Nếu muốn bật kiểm tra chứng chỉ (Strict SSL) thì gỡ comment 2 dòng dưới
-        -- ssl_verify = true,
-        -- ssl_cert_file = "/etc/ssl/certs/ca-certificates.crt",
     })
 
     if not res then
@@ -63,13 +56,15 @@ end
 
 local function format_alert(opts)
     return table.concat({
-        "🚨 Security Alert",
-        "Time: " .. os.date("%Y-%m-%d %H:%M:%S"),
-        "IP blocked: " .. (opts.ip or "unknown"),
-        "Attack type: " .. (opts.attack_type or "unknown"),
-        "Penalty score: " .. (opts.score and tostring(opts.score) or "n/a"),
-        "Reason: " .. (opts.reason or "block threshold reached"),
-        "Details: " .. (opts.details or "-"),
+        "🛡️ *Security Gateway Alert*",
+        "────────────────────────",
+        "🕒 *Thời gian:* " .. os.date("%H:%M:%S | %d-%m-%Y"),
+        "🌐 *IP tấn công:* `" .. (opts.ip or "unknown") .. "`",
+        "💥 *Loại tấn công:* " .. (opts.attack_type or "unknown"),
+        "⚠️ *Mức độ nguy hiểm:* " .. (opts.score or "n/a"),
+        "📝 *Chi tiết:* " .. (opts.details or "-"),
+        "────────────────────────",
+        "🛑 *Trạng thái:* IP đã bị BLACKLIST vĩnh viễn."
     }, "\n")
 end
 
