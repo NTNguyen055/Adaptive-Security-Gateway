@@ -64,7 +64,7 @@ local function format_alert(opts)
         "⚠️ *Mức độ nguy hiểm:* " .. (opts.score or "n/a"),
         "📝 *Chi tiết:* " .. (opts.details or "-"),
         "────────────────────────",
-        "🛑 *Trạng thái:* IP đã bị BLACKLIST vĩnh viễn."
+        "🛑 *Trạng thái:* IP đã bị đưa vào BLACKLIST vĩnh viễn."
     }, "\n")
 end
 

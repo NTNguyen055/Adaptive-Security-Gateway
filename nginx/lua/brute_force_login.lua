@@ -249,25 +249,30 @@ function _M.record_failed_attempt(ctx)
         ctx.brute_force.block_now = true
         
         local risk_penalty = cfg.risk_penalty
+        
+        -- [FIX TÍCH HỢP RISK ENGINE]:
+        -- 1. Đảm bảo cấu trúc Security context tồn tại
         ctx.security = ctx.security or {}
-        ctx.security.risk = (ctx.security.risk or 0) + risk_penalty
         ctx.security.signals = ctx.security.signals or {}
+        
+        -- 2. Tăng điểm Risk
+        ctx.security.risk = (ctx.security.risk or 0) + risk_penalty
+        ctx.security.block = true
+        
+        -- 3. GÁN TÍN HIỆU ĐỂ RISK ENGINE GỬI TELEGRAM
+        -- Risk Engine sẽ thấy "brute_force_attack" trong signals và tự động phát cảnh báo
+        table.insert(ctx.security.signals, "brute_force_attack")
         table.insert(ctx.security.signals, "brute_force_attempt:" .. attempt_count)
 
-        -- [CRITICAL FIX] Set cooldown lockout = 1 năm (vĩnh viễn block)
+        -- Thực thi Lockout vào Redis
         local lockout_key = "brute_force:lockout:" .. ip
         local permanent_ttl = 31536000  -- 1 năm
         red:set(lockout_key, "1", "EX", permanent_ttl)
 
-        -- Thêm IP vào blacklist tạm thời để các module blacklist bắt được ngay
         add_ip_to_blacklist(ip, red)
-
-        -- Cập nhật risk reputation để những request sau cũng chịu ảnh hưởng
         add_risk_reputation(ip, risk_penalty, red)
 
-        ngx.log(ngx.ALERT, "[BRUTE_FORCE] IP ", ip, 
-                " exceeded max attempts! PERMANENT BAN applied (+", risk_penalty, 
-                " risk points). Lockout for ", permanent_ttl, "s (1 year)")
+        ngx.log(ngx.ALERT, "[BRUTE_FORCE] IP ", ip, " exceeded max attempts! PERMANENT BAN applied.")
     else
         ctx.brute_force.action = "pass"
     end

@@ -197,16 +197,19 @@ function _M.run(ctx)
     if final_risk >= cfg.block_threshold then
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
         if metric_blocked then metric_blocked:inc(1, {"risk_block"}) end
-
+        
         ctx.security.risk_action = "block"
-        local attack_types = table.concat(signals, ", ")
-
+        
+        -- [FIX]: Định nghĩa biến local ở đây để tránh lỗi nil
+        local attack_types_str = table.concat(signals, ", ")
+        if attack_types_str == "" then attack_types_str = "unknown" end
+        
         telegram_alert.send({
             ip = ip,
-            attack_type = attack_types,
+            attack_type = attack_types_str,
             score = final_risk,
             reason = "Khóa vĩnh viễn vì hành vi tấn công trái phép",
-            details = "signals=" .. attack_type
+            details = "signals=" .. attack_types_str
         })
 
     elseif final_risk >= cfg.limit_threshold then
