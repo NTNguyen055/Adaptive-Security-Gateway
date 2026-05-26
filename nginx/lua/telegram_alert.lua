@@ -61,7 +61,7 @@ local function format_alert(opts)
         "🕒 *Thời gian:* " .. os.date("%H:%M:%S | %d-%m-%Y"),
         "🌐 *IP tấn công:* `" .. (opts.ip or "unknown") .. "`",
         "💥 *Loại tấn công:* " .. (opts.attack_type or "unknown"),
-        "⚠️ *Mức độ nguy hiểm:* " .. (opts.score or "n/a"),
+        "⚠️ *Điểm phạt:* " .. (opts.score or "n/a"),
         "📝 *Chi tiết:* " .. (opts.details or "-"),
         "────────────────────────",
         "🛑 *Trạng thái:* IP đã bị đưa vào BLACKLIST vĩnh viễn."

@@ -32,8 +32,11 @@ local SIGNAL_BONUS = {
     -- FIX 5: Bổ sung các tín hiệu bảo mật cực kỳ nguy hiểm
     jwt_replay         = 15,   -- Đánh cắp Token
     jwt_alg_attack     = 20,   -- Tấn công kỹ thuật bẻ khóa JWT
-    waf_xss            = 10,   -- Lỗ hổng nhúng mã JS
+    waf_xss            = 20,   -- Lỗ hổng nhúng mã JS
     xff_chain_abuse    = 15,   -- Giấu mặt sau nhiều tầng Proxy
+
+    brute_force_attack = 30,  -- Tín hiệu từ brute_force_login.lua
+    xff_malformed      = 20,  -- Tín hiệu từ xff_guard.lua
 }
 
 -- ============================================================

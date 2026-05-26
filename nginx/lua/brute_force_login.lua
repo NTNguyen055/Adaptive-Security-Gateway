@@ -8,6 +8,7 @@
 
 local _M = {}
 local redis_helper = require "redis_helper"
+local telegram_alert = require "telegram_alert"
 local ngx = ngx
 local tonumber = tonumber
 local string = string
@@ -52,7 +53,21 @@ local function add_risk_reputation(ip, amount, red)
         ttl = 31536000  -- 1 năm = block vĩnh viễn, admin phải xóa thủ công
     end
     red:set(key, string.format("%.2f", new_score), "EX", ttl)
-    ngx.log(ngx.WARN, "[BRUTE_FORCE] Risk reputation updated for IP ", ip, ": ", current, " -> ", new_score, " (TTL=", ttl, "s)")
+
+    ngx.log(
+        ngx.WARN,
+        "[BRUTE_FORCE] Risk reputation updated for IP ",
+        ip,
+        ": ",
+        current,
+        " -> ",
+        new_score,
+        " (TTL=",
+        ttl,
+        "s)"
+    )
+
+    return new_score
 end
 
 -- ============================================================
@@ -270,9 +285,31 @@ function _M.record_failed_attempt(ctx)
         red:set(lockout_key, "1", "EX", permanent_ttl)
 
         add_ip_to_blacklist(ip, red)
-        add_risk_reputation(ip, risk_penalty, red)
 
-        ngx.log(ngx.ALERT, "[BRUTE_FORCE] IP ", ip, " exceeded max attempts! PERMANENT BAN applied.")
+        local final_risk = add_risk_reputation(
+            ip,
+            risk_penalty,
+            red
+        ) or risk_penalty
+
+        ngx.log(
+            ngx.ALERT,
+            "[BRUTE_FORCE] IP ",
+            ip,
+            " exceeded max attempts! PERMANENT BAN applied. Risk=",
+            final_risk
+        )
+
+        telegram_alert.send({
+            ip = ip,
+            attack_type = "Brute Force Login",
+            score = final_risk,
+            details = string.format(
+                "IP vượt quá số lần đăng nhập thất bại tối đa (%d/%d)",
+                attempt_count,
+                cfg.max_attempts
+            )
+        })
     else
         ctx.brute_force.action = "pass"
     end
