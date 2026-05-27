@@ -34,7 +34,6 @@ services:
       retries: 3
       start_period: 30s
       
-    # [FIX CẤU HÌNH]: Dùng $$ để shell trong container tự động đọc biến từ Dockerfile hoặc .env
     command: >
       sh -c "
       python manage.py migrate --noinput &&
@@ -120,7 +119,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "127.0.0.1:9145:9145"
+      # Đổi thành map toàn bộ host để có thể check metrics từ ngoài nếu cần (Tùy chọn)
+      - "9145:9145"
 
     env_file:
       - /home/ubuntu/appointment-web/.env
@@ -152,6 +152,47 @@ services:
 
     networks:
       - internal
+
+  # ===========================================================================
+  # PROMETHEUS (Thu thập Metrics)
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - internal
+
+  # ===========================================================================
+  # GRAFANA (Vẽ biểu đồ Dashboard)
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+# =============================================================================
+# VOLUMES & NETWORKS
+# =============================================================================
+volumes:
+  prometheus_data:
+  grafana_data:
 
 networks:
   internal:
