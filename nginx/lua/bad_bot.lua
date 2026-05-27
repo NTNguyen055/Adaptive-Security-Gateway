@@ -106,37 +106,97 @@ function _M.run(ctx)
 
     -- ── L1 CACHE (FIX 7: Tối ưu CPU, không quét lại UA đã phân loại) ──────
     -- [FIX KIẾN TRÚC]: Tách riêng ua_cache để không giành RAM với ip_cache của Blacklist
-    local cache = ngx.shared.ua_cache 
+    local cache = ngx.shared.ua_cache
     local cache_key = "ua:" .. ngx.md5(ua_lower)
 
     if cache then
         local cached_res = cache:get(cache_key)
+
         if cached_res then
+
             if cached_res == "whitelist" then
                 ctx.security.ua_whitelisted = true
                 return
-            elseif cached_res == "scanner" then
+
+            elseif cached_res:find("^scanner:", 1) then
+                local scanner_name =
+                    cached_res:match("^scanner:(.+)$")
+                    or "unknown"
+
                 ctx.security.bad_bot_scanner = true
                 ctx.security.block           = true
                 ctx.security.risk            = 100
-                table.insert(ctx.security.signals, "bad_bot_scanner_cached")
+
+                table.insert(
+                    ctx.security.signals,
+                    "bad_bot_scanner:" .. scanner_name
+                )
+
+                ngx.log(
+                    ngx.WARN,
+                    "[BAD_BOT] Scanner(CACHED) ip=",
+                    ip,
+                    " matched=",
+                    scanner_name
+                )
+
                 return
-            elseif cached_res == "headless" then
+
+            elseif cached_res:find("^headless:", 1) then
+                local tool =
+                    cached_res:match("^headless:(.+)$")
+                    or "unknown"
+
                 ctx.security.bad_bot_headless = true
-                ctx.security.risk = math_min((ctx.security.risk or 0) + 60, 100)
-                table.insert(ctx.security.signals, "bad_bot_headless_cached")
+
+                ctx.security.risk = math_min(
+                    (ctx.security.risk or 0) + 60,
+                    100
+                )
+
+                table.insert(
+                    ctx.security.signals,
+                    "bad_bot_headless:" .. tool
+                )
+
                 return
-            elseif cached_res == "dev_tool" then
+
+            elseif cached_res:find("^dev_tool:", 1) then
+                local tool =
+                    cached_res:match("^dev_tool:(.+)$")
+                    or "unknown"
+
                 ctx.security.dev_tool = true
-                ctx.security.risk = math_min((ctx.security.risk or 0) + 20, 100)
-                table.insert(ctx.security.signals, "dev_tool_cached")
+
+                ctx.security.risk = math_min(
+                    (ctx.security.risk or 0) + 10,
+                    100
+                )
+
+                table.insert(
+                    ctx.security.signals,
+                    "dev_tool:" .. tool
+                )
+
                 return
+
             elseif cached_res == "normal" then
                 ctx.security.ua_normal = true
                 return
+
             elseif cached_res == "unknown" then
                 ctx.security.ua_unknown = true
-                ctx.security.risk = math_min((ctx.security.risk or 0) + 5, 100)
+
+                ctx.security.risk = math_min(
+                    (ctx.security.risk or 0) + 5,
+                    100
+                )
+
+                table.insert(
+                    ctx.security.signals,
+                    "ua_unknown:cached"
+                )
+
                 return
             end
         end
@@ -162,7 +222,13 @@ function _M.run(ctx)
         table.insert(ctx.security.signals, "bad_bot_scanner:" .. matched_scanner)
         ngx.log(ngx.WARN, "[BAD_BOT] Scanner ip=", ip, " matched=", matched_scanner, " ua=", ua:sub(1, MAX_UA_LOG))
         
-        if cache then cache:set(cache_key, "scanner", 3600) end
+        if cache then
+            cache:set(
+                cache_key,
+                "scanner:" .. matched_scanner,
+                21600
+            )
+        end
         if metric_blocked then metric_blocked:inc(1, {"bad_bot_scanner"}) end
         return
     end
@@ -177,7 +243,16 @@ function _M.run(ctx)
         table.insert(ctx.security.signals, "bad_bot_headless:" .. matched_headless)
         ngx.log(ngx.WARN, "[BAD_BOT] Headless ip=", ip, " matched=", matched_headless, " ua=", ua:sub(1, MAX_UA_LOG))
         
-        if cache then cache:set(cache_key, "headless", 3600) end
+        if cache then 
+            cache:set(
+                cache_key,
+                "headless:" .. matched_headless,
+                3600
+            )
+        end
+        if metric_blocked then
+            metric_blocked:inc(1, {"bad_bot_headless"})
+        end
         return
     end
 
@@ -198,7 +273,13 @@ function _M.run(ctx)
 
         ngx.log(ngx.INFO, "[BAD_BOT] DevTool ip=", ip, " matched=", matched_dev, " ua=", ua:sub(1, MAX_UA_LOG))
         
-        if cache then cache:set(cache_key, "dev_tool", 3600) end
+        if cache then 
+            cache:set(
+                cache_key,
+                "dev_tool:" .. matched_dev,
+                3600
+            )
+        end
         return
     end
 

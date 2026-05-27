@@ -23,20 +23,36 @@ local MAX_RISK     = 100
 -- SIGNAL CORRELATION
 -- ============================================================
 local SIGNAL_BONUS = {
-    -- Đã có
-    xff_private_client = 5,
-    bad_bot_scanner    = 10,
-    geo_block          = 5,
-    empty_ua           = 5,
-    
-    -- FIX 5: Bổ sung các tín hiệu bảo mật cực kỳ nguy hiểm
-    jwt_replay         = 15,   -- Đánh cắp Token
-    jwt_alg_attack     = 20,   -- Tấn công kỹ thuật bẻ khóa JWT
-    waf_xss            = 20,   -- Lỗ hổng nhúng mã JS
-    xff_chain_abuse    = 15,   -- Giấu mặt sau nhiều tầng Proxy
 
-    brute_force_attack = 30,  -- Tín hiệu từ brute_force_login.lua
-    xff_malformed      = 20,  -- Tín hiệu từ xff_guard.lua
+    -- XFF
+    xff_private_client = 5,
+    xff_private_chain  = 10,
+    xff_chain_abuse    = 15,
+    xff_malformed      = 10,
+
+    -- Bot
+    bad_bot_scanner    = 10,
+    bad_bot_headless   = 10,
+    dev_tool           = 5,
+    empty_ua           = 5,
+    ua_unknown         = 5,
+
+    -- WAF
+    waf_sqli           = 25,
+    waf_xss            = 20,
+
+    -- JWT
+    jwt_replay         = 15,
+    jwt_alg_attack     = 20,
+
+    -- Rate limit
+    rate_limit_hard    = 15,
+
+    -- Geo
+    geo_block          = 5,
+
+    -- Brute force
+    brute_force_attack = 30,
 }
 
 -- ============================================================
