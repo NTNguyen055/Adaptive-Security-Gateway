@@ -26,8 +26,9 @@ local SIGNAL_BONUS = {
 
     -- XFF
     xff_private_client = 5,
-    xff_private_chain  = 10,
+    xff_private_chain  = 25,
     xff_chain_abuse    = 15,
+    xff_spoof          = 25,
     xff_malformed      = 10,
 
     -- Bot
