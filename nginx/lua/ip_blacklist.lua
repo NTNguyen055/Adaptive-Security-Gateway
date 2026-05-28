@@ -12,6 +12,7 @@ local CACHE_TTL_NEGATIVE = 30
 -- ============================================================
 function _M.run(ctx)
     -- Ưu tiên dùng client_ip đã normalize từ xff_guard
+    -- Dùng IP thực đã được XFF Guard xử lý và bóc tách khỏi các Proxy giả mạo.
     local ip = (ctx.security and ctx.security.client_ip)
                or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
@@ -26,11 +27,17 @@ function _M.run(ctx)
 
     -- ── L1 CACHE (shared dict) ────────────────────────────────
     if cache then
+        -- Đọc L1 Cache (RAM của Worker Nginx). Đây là lá chắn đầu tiên.
+        -- Cực kỳ nhanh, giúp Nginx chịu tải hàng chục nghìn RPS từ các IP đã bị block
+        -- mà không cần kết nối tới Redis.
         local val, flags = cache:get("bl:" .. ip)
 
         if val ~= nil then
             if val == 1 then
                 -- Revalidate với Redis để việc xóa blacklist bằng tay có tác dụng ngay.
+                -- Khi IP bị cấm, ta thỉnh thoảng kiểm tra lại với Redis. 
+                -- Nếu Admin chủ động vào Redis xóa IP này để ân xá (unban), hệ thống sẽ cập nhật ngay
+                -- thay vì bắt người dùng chờ hết thời gian CACHE_TTL_POSITIVE (1 phút).
                 local red, err = redis_helper.get_redis(0)
                 if red then
                     red:init_pipeline()
@@ -88,6 +95,8 @@ function _M.run(ctx)
                         return
                     end
                 else
+                    -- Fail-closed: Nếu đứt kết nối Redis khi đang revalidate, 
+                    -- cứ tiếp tục Block (giữ an toàn làm trọng).
                     ctx.security.ip_blacklisted = true
                     ctx.security.block          = true
                     ctx.security.risk           = 100
@@ -105,7 +114,8 @@ function _M.run(ctx)
     end
 
     -- ── L2 REDIS ─────────────────────────────────────────────
-    -- [SỬA ĐỔI] Lấy kết nối từ helper, tự động trỏ vào db=0
+    -- Lấy kết nối từ helper, tự động trỏ vào db=0
+    -- Nếu không có trong L1 Cache (cache miss), phải truy vấn Redis (L2 Cache).
     local red, err = redis_helper.get_redis(0)
 
     if not red then
@@ -121,7 +131,9 @@ function _M.run(ctx)
         return
     end
 
-    -- [SỬA ĐỔI QUAN TRỌNG] Sử dụng Pipeline để gộp 2 lệnh Redis vào 1 round-trip
+    -- Sử dụng Pipeline để gộp 2 lệnh Redis vào 1 round-trip
+    -- TỐI ƯU I/O: Kiểm tra cả 2 nơi (Set thủ công của Admin và Key TTL tự động của Risk Engine) 
+    -- trong cùng 1 cục mạng, giảm một nửa thời gian chờ (latency).
     red:init_pipeline()
     red:sismember("blacklist_ips", ip)
     red:get("blacklist:" .. ip)
@@ -152,6 +164,8 @@ function _M.run(ctx)
             cache:set("bl:" .. ip, 1, CACHE_TTL_POSITIVE)
         end
 
+        -- ACTION CORE: Gắn cờ Block, đẩy Risk lên Max và bắn signal 
+        -- để ngắt toàn bộ các công đoạn xử lý Security đằng sau.
         ctx.security.ip_blacklisted = true
         ctx.security.block          = true
         ctx.security.risk           = 100
@@ -183,9 +197,12 @@ function _M.run(ctx)
     end
 
     -- ── NEGATIVE CACHE ───────────────────────────────────────
-    -- [FIX HIỆU NĂNG CHÍ MẠNG]: Cache IP sạch (số 0) vô điều kiện trong 30s.
+    -- Cache IP sạch (số 0) vô điều kiện trong 30s.
     -- Xóa bỏ điều kiện risk < 20 để tránh việc hacker lợi dụng request rác 
     -- ép Nginx phải liên tục query xuống Redis (Bypass L1 Cache).
+    -- CỰC KỲ QUAN TRỌNG: "Cache lại cả sự thật rằng IP này KHÔNG bị block".
+    -- Nếu không có dòng này, với mỗi request hợp lệ, Nginx đều phải gọi Redis, 
+    -- làm tê liệt DB khi hệ thống nhận hàng nghìn user truy cập cùng lúc.
     if cache then
         cache:set("bl:" .. ip, 0, CACHE_TTL_NEGATIVE)
     end

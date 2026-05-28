@@ -58,6 +58,8 @@ function _M.run(ctx)
 
     local uri = ngx.var.uri
     
+    -- Bỏ qua kiểm tra JWT đối với các endpoint Public (như /login) 
+    -- hoặc các route phục vụ giao diện Web (nơi dùng Cookie/Session thay vì Bearer Token).
     if PUBLIC_PATHS[uri] or is_web_route(uri) then
         ctx.security = ctx.security or {}
         ctx.security.jwt_public_path = true
@@ -77,6 +79,8 @@ function _M.run(ctx)
     -- ── MISSING JWT ───────────────────────────────────────────
     if not auth_header then
         -- Tương thích với Session Cookie của Django
+        -- Cơ chế Hybrid Auth: Nếu API không nhận được JWT, nhưng lại thấy có 
+        -- Cookie sessionid (của web framework như Django/Laravel), hệ thống sẽ nhân nhượng cho đi tiếp.
         if cookie_header and re_find(cookie_header, [[sessionid=]], "jo") then
             ctx.security.jwt_missing = true
             ctx.security.using_session = true
@@ -102,6 +106,8 @@ function _M.run(ctx)
     end
 
     -- ── FORMAT CHECK ─────────────────────────────────────────
+    -- Kiểm tra định dạng nhanh bằng Regex. Chặn đứng các payload rác 
+    -- trước khi đưa vào hàm thư viện JWT phân tích (giúp tiết kiệm CPU).
     local m = re_match(
         auth_header,
         [[^Bearer\s+([A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)$]],
@@ -121,6 +127,8 @@ function _M.run(ctx)
     local jwt_lib = get_libs()
     
     -- [FIX NHẤT QUÁN CODEBASE]: Sử dụng SHA-256 thay cho MD5 để chuẩn hóa bảo mật
+    -- Băm (Hash) Token thành một chuỗi ngắn cố định. Tránh việc dùng toàn bộ 
+    -- chuỗi Token dài làm Key lưu vào Cache gây lãng phí bộ nhớ (RAM).
     local sha256 = resty_sha256:new()
     sha256:update(token)
     local digest = sha256:final()
@@ -129,6 +137,9 @@ function _M.run(ctx)
     local cache      = ngx.shared.jwt_cache
 
     -- ── L1 CACHE HIT ─────────────────────────────────────────
+    -- CORE HIỆU NĂNG: Việc giải mã và xác thực chữ ký số (Crypto Verify) cực kỳ tốn CPU.
+    -- Bằng cách lưu kết quả xác thực (số 1 là hợp lệ, 2 là lỗi) vào L1 Cache, hệ thống sẽ bỏ qua toàn bộ
+    -- phép toán mã hóa ở các request tiếp theo của cùng Token đó, giúp tốc độ tăng vọt.
     if cache then
         local cached_val = cache:get(token_hash)
         if cached_val == 1 then
@@ -164,6 +175,9 @@ function _M.run(ctx)
     end
 
     -- ── ALG CHECK ────────────────────────────────────────────
+    -- BẢO MẬT CORE: Ngăn chặn "Algorithm Confusion Attack". 
+    -- Hacker có thể đổi header `alg` thành "none" (bỏ qua ký) hoặc "RS256" (dùng Public Key làm Secret). 
+    -- Ép cứng kiểm tra phải là `HS256` để triệt tiêu toàn bộ rủi ro này.
     if not jwt_obj.header or jwt_obj.header.alg ~= "HS256" then
         ctx.security.jwt_alg_attack = true
         ctx.security.block          = true
@@ -175,6 +189,8 @@ function _M.run(ctx)
     end
 
     -- ── VERIFY SIGNATURE ─────────────────────────────────────
+    -- Hàm verify lõi: Dùng Secret Key của hệ thống để băm lại Payload và đối chiếu.
+    -- Nếu chữ ký không khớp -> Dữ liệu đã bị hacker sửa đổi giữa đường.
     jwt_obj = jwt_lib:verify(JWT_SECRET, token)
 
     if not jwt_obj or not jwt_obj.verified then
@@ -229,6 +245,8 @@ function _M.run(ctx)
 
     -- ── IAT CHECK ────────────────────────────────────
     -- Bắt những token có timestamp tạo ra ở tương lai (Dấu hiệu hacker tự bịa token)
+    -- Issued At (iat) là thời điểm sinh ra Token. Nếu nó lớn hơn giờ hệ thống hiện tại,
+    -- nghĩa là có sự giả mạo lộ liễu (hoặc lệch giờ máy chủ nghiêm trọng).
     if payload.iat and payload.iat > now + 5 then
         ctx.security.jwt_iat_future = true
         ctx.security.block = true
@@ -239,6 +257,9 @@ function _M.run(ctx)
     -- ── REPLAY DETECTION ─────────────────────────────────────
     local replay_key = "jwt_ip:" .. token_hash
     if cache then
+        -- CHỐNG ĐÁNH CẮP TOKEN (Token Theft / XSS): Mỗi token hợp lệ được gắn 
+        -- chặt vào IP gọi nó lần đầu. Nếu cùng một Token hợp lệ nhưng lát sau lại phát sinh từ một IP khác lạ,
+        -- có nghĩa là Token đã bị đánh cắp (hack qua XSS/MITM). Khóa cứng + đẩy Risk lên 100 (Max).
         local prev_ip = cache:get(replay_key)
         if prev_ip and prev_ip ~= ip then
             ctx.security.jwt_replay = true
@@ -261,9 +282,13 @@ function _M.run(ctx)
     end
 
     -- ── FORWARD IDENTITY HEADERS ─────────────────────────────
+    -- Backend không cần tự verify JWT nữa. Nginx đẩy luôn thông tin User xuống 
+    -- qua Header HTTP. Rất tiện cho kiến trúc Microservices.
     ngx.req.set_header("X-User-ID", tostring(payload.user_id))
     
     -- Khử trùng (Sanitize) Role để chặn đứng Header Injection
+    -- Xóa bỏ mọi ký tự lạ (chỉ giữ lại chữ, số, gạch ngang, gạch dưới) 
+    -- khỏi trường "role" để đề phòng kỹ thuật HTTP Header Injection nhắm vào Backend.
     local role = tostring(payload.role or "user"):gsub("[^%w_%-]", "")
     ngx.req.set_header("X-User-Role", role)
 

@@ -7,6 +7,7 @@ local geo = require "resty.maxminddb"
 -- CONFIG
 -- =============================================================================
 
+-- Danh sách White-list: Các quốc gia được phép truy cập bình thường (Bypass block).
 local ALLOWED_COUNTRIES = {
     ["VN"] = true,
     ["US"] = true,
@@ -15,6 +16,8 @@ local ALLOWED_COUNTRIES = {
 }
 
 -- LEVEL 4: GEO multiplier (quan trọng)
+-- Hệ số nhân rủi ro dựa theo quốc gia. Các nước có tỷ lệ tấn công/spam cao (CN, RU, KP)
+-- sẽ có hệ số nhân (multiplier) cao hơn, làm điểm rủi ro (risk score) tăng vọt nhanh chóng.
 local GEO_MULTIPLIER = {
     VN = 1.0,
     US = 1.1,
@@ -29,6 +32,7 @@ local GEO_MULTIPLIER = {
 }
 
 -- Risk matrix (LEVEL 3)
+-- Điểm rủi ro cộng dồn (Additive Risk) cho từng loại hành vi độc hại phát hiện được.
 local GEO_RISK_MATRIX = {
     base_foreign = 25,
 
@@ -48,6 +52,8 @@ local GEO_RISK_MATRIX = {
 -- =============================================================================
 function _M.run(ctx)
 
+    -- CORE: Xác định IP thực của Client. Ưu tiên lấy từ biến ctx.security đã được
+    -- module khác xử lý (ví dụ: bóc tách từ Cloudflare/Proxy), nếu không có mới dùng IP gốc của Nginx.
     local ip = (ctx.security and ctx.security.client_ip)
         or ngx.var.realip_remote_addr
         or ngx.var.remote_addr
@@ -56,6 +62,7 @@ function _M.run(ctx)
     ctx.security.signals = ctx.security.signals or {}
 
     -- Private IP skip geo
+    -- Bỏ qua tra cứu GeoIP với IP nội bộ (LAN/Localhost) để tránh lãng phí tài nguyên và lỗi.
     if not ip or utils.is_private_ip(ip) then
         ctx.security.geo_private = true
         table.insert(ctx.security.signals, "geo_private")
@@ -63,6 +70,7 @@ function _M.run(ctx)
     end
 
     -- Lookup geo
+    -- CORE: Truy vấn MaxMind DB để tìm mã quốc gia từ IP.
     local res, err = geo.lookup(ip)
 
     if not res then
@@ -80,6 +88,8 @@ function _M.run(ctx)
     ctx.security.geo_country = country
 
     -- Allowed countries → bypass block
+    -- CORE: Nếu IP thuộc White-list (VN, US, SG, JP), kết thúc module tại đây.
+    -- Khách hợp lệ sẽ không bị dính logic Block và Risk Scoring bên dưới.
     if ALLOWED_COUNTRIES[country] then
         ctx.security.geo_allowed = true
         return
@@ -88,6 +98,8 @@ function _M.run(ctx)
     -- =========================
     -- BLOCK TRIGGER
     -- =========================
+    -- CORE ACTION: Bật cờ (flag) chặn truy cập (block=true) vì đây là IP 
+    -- đến từ quốc gia KHÔNG nằm trong danh sách ALLOWED_COUNTRIES.
     ctx.security.geo_blocked = true
     ctx.security.block = true
 
@@ -95,8 +107,11 @@ function _M.run(ctx)
     -- RISK SCORING (LEVEL 3 + 4 + 5)
     -- =========================
 
+    -- Khởi tạo điểm rủi ro nền (base risk) dành cho IP ngoại (không thuộc allow list).
     local risk_add = GEO_RISK_MATRIX.base_foreign
 
+    -- Tích lũy điểm rủi ro: Nếu Request này đã bị gắn cờ lỗi từ các module trước đó
+    -- (ví dụ: là bot xấu, vượt quá rate limit, giả mạo IP...), thì cộng thêm điểm phạt tương ứng.
     if ctx.security.bad_bot_scanner then
         risk_add = risk_add + GEO_RISK_MATRIX.bad_bot_scanner
     end
@@ -128,9 +143,13 @@ function _M.run(ctx)
     -- =========================
     -- LEVEL 4: MULTIPLICATIVE RISK (IMPORTANT FIX)
     -- =========================
+    -- Lấy hệ số nhân cơ bản theo quốc gia (vd: RU = 1.5).
     local multiplier = GEO_MULTIPLIER[country] or GEO_MULTIPLIER.UNKNOWN
 
     -- combo attack amplification
+    -- CORE: Tính năng khuếch đại rủi ro (Amplification). 
+    -- Nếu IP vừa thuộc quốc gia bị cấm, VÀ vừa có hành vi rà quét (bot scanner) -> Tăng mạnh hệ số nhân.
+    -- Giúp trừng phạt cực nặng các Botnet đến từ nước ngoài.
     if ctx.security.bad_bot_scanner and not ALLOWED_COUNTRIES[country] then
         multiplier = multiplier + 0.2
     end
@@ -143,12 +162,16 @@ function _M.run(ctx)
         multiplier = multiplier + 0.2
     end
 
+    -- Nhân tổng điểm tích lũy với hệ số khuếch đại.
     risk_add = risk_add * multiplier
 
     -- clamp
+    -- Cắt trần (Clamp): Đảm bảo điểm rủi ro tăng thêm không vượt quá ngưỡng tối đa là 100.
     risk_add = math_min(risk_add, 100)
 
     -- apply
+    -- CORE: Cộng điểm rủi ro vừa tính toán được vào tổng điểm rủi ro chung của toàn bộ Request,
+    -- (tối đa toàn cục cũng là 100). Biến ctx.security.risk này sẽ được các module sau dùng để quyết định chặn/captcha.
     ctx.security.risk = math_min((ctx.security.risk or 0) + risk_add, 100)
 
     table.insert(ctx.security.signals, "geo_block:" .. country)

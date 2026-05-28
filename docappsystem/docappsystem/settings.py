@@ -70,7 +70,7 @@ SESSION_COOKIE_SECURE   = True
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 
-# FIX 4: Đọc TTL từ ENV để đảm bảo đồng bộ tuyệt đối với JWT_TTL (Mặc định 3600s)
+# Đọc TTL từ ENV để đảm bảo đồng bộ tuyệt đối với JWT_TTL (Mặc định 3600s)
 SESSION_COOKIE_AGE = int(get_env("SESSION_TTL", "3600"))
 
 SESSION_SAVE_EVERY_REQUEST = False
@@ -90,7 +90,7 @@ SECURE_HSTS_SECONDS              = 0      # Tắt HSTS của Django
 SECURE_CONTENT_TYPE_NOSNIFF      = False  # Tắt Nosniff của Django
 SECURE_REFERRER_POLICY           = None   # Tắt Referrer Policy của Django
 
-# FIX: Cấu hình Clickjacking đồng bộ với Nginx Gateway
+# Cấu hình Clickjacking đồng bộ với Nginx Gateway
 X_FRAME_OPTIONS                  = "SAMEORIGIN"
 
 # ============================================================
@@ -186,7 +186,7 @@ STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 _static_dir = BASE_DIR / "static"
 
-# FIX 2: Bẫy lỗi sớm (Fail-fast) nếu cấu hình thư mục tĩnh bị xung đột
+# Bẫy lỗi sớm (Fail-fast) nếu cấu hình thư mục tĩnh bị xung đột
 if STATIC_ROOT.resolve() == _static_dir.resolve():
     raise ImproperlyConfigured(
         "STATIC_ROOT and STATICFILES_DIRS cannot point to the same directory. "
@@ -254,7 +254,7 @@ else:
         "default":     {"BACKEND": "django.core.files.storage.FileSystemStorage"},
         "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
     }
-    # FIX 1: Chèn WhiteNoiseMiddleware vào đúng vị trí số 1 (sau SecurityMiddleware)
+    # Chèn WhiteNoiseMiddleware vào đúng vị trí số 1 (sau SecurityMiddleware)
     MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 # ============================================================
@@ -270,7 +270,7 @@ LOGGING = {
             "format": "[%(asctime)s] %(levelname)-8s %(name)s: %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
-        # FIX 3: Sửa %(message)r thành "%(message)s" bên trong ngoặc kép
+        # Sửa %(message)r thành "%(message)s" bên trong ngoặc kép
         # Đảm bảo các hệ thống đọc Log tập trung (ELK, Datadog...) không bị gãy format JSON
         "json": {
             "()":      "logging.Formatter",

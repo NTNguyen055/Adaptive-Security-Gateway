@@ -23,6 +23,9 @@ end
 local _limiter_cache = nil
 
 local function get_limiter()
+    -- CORE HIỆU NĂNG: Khởi tạo Limiter (Token Bucket) 1 lần duy nhất cho mỗi 
+    -- Nginx Worker Process và lưu vào biến toàn cục của script Lua (tương đương cấp Worker).
+    -- Điều này giúp hệ thống không tốn chi phí rà soát bộ nhớ chia sẻ ở mỗi request.
     if _limiter_cache then return _limiter_cache end
 
     local cfg = get_config()
@@ -45,28 +48,36 @@ local function auto_blacklist(ip, ctx)
     local counter_store = ngx.shared.rl_counter
     if not counter_store then return end
 
+    -- Đếm số lần IP này bị giới hạn rate limit trong 1 cửa sổ thời gian (60 giây).
     local count = counter_store:incr("rl:" .. ip, 1, 0, cfg.bl_window)
     if not count then return end
 
     -- FIX 2: Sửa logic AND thành OR để chặn Spam thuần túy
     -- Một IP spam sẽ bị chặn nếu VƯỢT THRESHOLD, 
     -- HOẶC nếu chưa vượt ngưỡng nhưng điểm Risk >= 50
+    -- CORE: Liên kết với module Risk Engine. Nếu IP này vừa spam request, 
+    -- vừa có những hành vi xấu (Bad Bot, VPN, Tor) làm điểm rủi ro cao -> Chặn thẳng tay dù chưa tới ngưỡng threshold.
     local should_block = (count >= cfg.bl_threshold) 
                       or (count >= 2 and (ctx.security.risk or 0) >= 50)
                       
     if not should_block then return end
 
     -- Lock để tránh chạy nhiều luồng ghi Redis cùng lúc
+    -- Race Condition Preventer: Khi IP bị tấn công bằng hàng nghìn luồng (threads), 
+    -- hàm này được gọi liên tục. `add` đảm bảo chỉ luồng chạy đầu tiên mới được phép chọc xuống Redis (L2).
     local lock = counter_store:add("bl_lock:" .. ip, 1, 5)
     if not lock then return end
 
     -- Ghi nhận blacklist vào RAM cục bộ của Worker hiện tại (L1)
+    -- Cập nhật ngay vào cache bộ nhớ chia sẻ của Nginx để ngắt mạch (Circuit Breaker) lập tức.
     local bl_cache = ngx.shared.ip_cache -- Đã đồng bộ tên cache với nginx.conf
     if bl_cache then
         bl_cache:set("bl:" .. ip, 1, cfg.bl_duration)
     end
 
     -- Bắn Async job lên Redis để thông báo cho các Worker khác (L2)
+    -- Nginx xử lý theo mô hình hướng sự kiện (Event-driven). Đẩy tác vụ ghi Redis 
+    -- vào Timer nền (ngx.timer) để không chặn (block) request hiện tại của người dùng.
     ngx.timer.at(0, function(premature, target_ip, duration, risk_score)
         if premature then return end
 
@@ -83,6 +94,8 @@ local function auto_blacklist(ip, ctx)
         if risk_score and risk_score >= 50 then
             final_ttl = 31536000  -- 1 năm = vĩnh viễn block
         end
+        -- Đồng bộ Blacklist lên Redis. Các Nginx node khác trong Cluster 
+        -- sẽ nhận biết được IP này và cùng chặn.
         red:set(key, "1")
         red:expire(key, final_ttl)
 
@@ -107,16 +120,24 @@ function _M.run(ctx)
 
     -- FIX 4: Chỉ dùng IP làm Key (Bỏ URI)
     -- Lý do: Ngăn chặn Hacker Bypass Limit bằng cách liên tục thay đổi URI request
+    -- Giới hạn áp dụng tổng quát cho MỌI endpoint. Hacker có đổi URL ngẫu nhiên
+    -- (Ví dụ: /api/1, /api/2) thì IP của hắn vẫn bị cộng dồn và ăn block.
     local key = ip
 
     ctx.security         = ctx.security or {}
     ctx.security.signals = ctx.security.signals or {}
 
+    -- Đưa IP vào Token Bucket. Hàm `incoming` sẽ đánh giá:
+    -- 1. Nếu delay = 0: Request hoàn toàn bình thường.
+    -- 2. Nếu delay > 0: Request này vượt Rate (RPS) nhưng vẫn chưa chạm nóc Burst. 
+    -- 3. Nếu delay = nil, err = 'rejected': Vượt cả Rate lẫn Burst. Bị Drop.
     local delay, err = limiter:incoming(key, true)
 
     -- ── REJECTED (Vượt qua ngương Burst) ────────────────────────
     if not delay then
         if err == "rejected" then
+            -- ACTION CORE: Kích hoạt Hard Block. Cập nhật thẳng +80 điểm Risk 
+            -- để chạm ngưỡng khóa vĩnh viễn của Risk Engine, sau đó ném qua hàm Auto Blacklist.
             ctx.security.rate_limit_hard = true
             ctx.security.block           = true   
             ctx.security.risk            = math_min((ctx.security.risk or 0) + 80, 100)
@@ -134,6 +155,8 @@ function _M.run(ctx)
 
     -- ── BURST (Vượt RPS nhưng chưa vượt ngưỡng Burst) ───────────
     if delay > 0 then
+        -- Trong ứng dụng thực tế, không Delay (sleep) request vì việc đó 
+        -- làm kẹt Worker của Nginx (DDoS tự sát). Thay vào đó, nếu đã chạm vùng Burst thì Block luôn.
         ctx.security.rate_limit_burst = true
         ctx.security.block = true
         ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)

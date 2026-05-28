@@ -5,5 +5,4 @@ global:
 scrape_configs:
   - job_name: 'api_security_gateway'
     static_configs:
-      # LƯU Ý: Đổi 'openresty_gateway' thành đúng tên container Nginx/OpenResty của bạn
       - targets: ['openresty_gateway:9145']

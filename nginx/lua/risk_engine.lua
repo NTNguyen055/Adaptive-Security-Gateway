@@ -11,6 +11,8 @@ local telegram_alert = require "telegram_alert"
 -- ============================================================
 local function get_config()
     return {
+        -- Ngưỡng hành động của Risk Engine: 
+        -- Đạt 50 điểm sẽ bị Limit (giới hạn / Captcha), đạt 80 điểm sẽ bị Block (chặn hoàn toàn).
         block_threshold = tonumber(os.getenv("RISK_BLOCK_THRESHOLD")) or 80,
         limit_threshold = tonumber(os.getenv("RISK_LIMIT_THRESHOLD")) or 50,
     }
@@ -22,6 +24,9 @@ local MAX_RISK     = 100
 -- ============================================================
 -- SIGNAL CORRELATION
 -- ============================================================
+-- Bảng quy đổi tín hiệu (Signals) thành Điểm rủi ro (Risk Points).
+-- Mỗi khi các module trước (WAF, Bot, Geo, Brute-force) phát hiện bất thường, 
+-- chúng không chặn ngay mà gắn "signal" vào Request. Risk Engine sẽ tổng hợp ở đây.
 local SIGNAL_BONUS = {
 
     -- XFF
@@ -79,13 +84,17 @@ function _M.run(ctx)
         signal_set[base_signal] = true
     end
 
+    -- Duyệt qua danh sách signal của Request hiện tại, tra bảng SIGNAL_BONUS để cộng điểm.
     for signal, points in pairs(SIGNAL_BONUS) do
         if signal_set[signal] then
             bonus = bonus + points
         end
     end
 
-    -- FIX 6: Mở rộng các combo nguy hiểm (Combination Bonus)
+    -- Mở rộng các combo nguy hiểm (Combination Bonus)
+    -- CORE: Tính năng "Combo Amplification" (Khuếch đại theo chuỗi). 
+    -- Nếu Attacker phối hợp nhiều phương thức (Vd: Dùng Bot + Scan SQLi), điểm rủi ro sẽ 
+    -- được cộng thêm (bonus) cực mạnh để ép IP chạm ngưỡng Block (80) ngay lập tức.
     if signal_set["waf_sqli"] and signal_set["bad_bot_scanner"] then bonus = bonus + 15 end
     if signal_set["rate_limit_hard"] and signal_set["geo_block"] then bonus = bonus + 10 end
     if signal_set["jwt_invalid"] and signal_set["rate_limit_hard"] then bonus = bonus + 10 end
@@ -98,7 +107,7 @@ function _M.run(ctx)
     base_risk = math_min(base_risk + bonus, MAX_RISK)
 
     -- ── REDIS REPUTATION ──────────────────────────────────────
-    -- FIX 1: Kết nối an toàn qua Helper (Tự động Select DB 0)
+    -- Kết nối an toàn qua Helper (Tự động Select DB 0)
     local red, err = redis_helper.get_redis(0)
 
     if not red then
@@ -113,14 +122,16 @@ function _M.run(ctx)
         return
     end
 
+    -- Lấy "Điểm uy tín" (Reputation) lịch sử của IP từ Redis.
     local key = "risk:v1:" .. ip
     local reputation = red:get(key)
     reputation = (reputation and reputation ~= ngx.null) and tonumber(reputation) or 0
 
-    -- FIX 2: Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
-    -- [CRITICAL FIX v2] Không decay - chỉ cộng thêm signal mới
+    -- Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
     -- Nếu request sạch (base_risk = 0), giữ nguyên reputation
     -- Nếu có signal mới, cộng thêm vào reputation
+    -- CORE (NO FORGIVENESS): Khác với các hệ thống cũ thường giảm điểm rủi ro theo thời gian (decay), 
+    -- hệ thống này cộng dồn chặt chẽ (reputation + base_risk). IP đã dính vết đen thì khó có cơ hội quay đầu.
     local final_risk = math_min(reputation + base_risk, MAX_RISK)
     
     -- Nếu đã permanent ban (reputation >= 80), giữ nguyên 80 (không nhân bất kỳ hệ số)
@@ -130,12 +141,14 @@ function _M.run(ctx)
     end
 
     -- =========================================================================
-    -- [NEW] BRUTE-FORCE REPUTATION TRACKING
+    -- BRUTE-FORCE REPUTATION TRACKING
     -- Kiểm tra lịch sử brute-force để accumulate risk across windows
     -- =========================================================================
     local bf_history_key = "brute_force:history:" .. ip
     local bf_history = red:get(bf_history_key)
     
+    -- Liên kết dữ liệu chéo module: Đọc lịch sử từ module Brute-force.
+    -- Nếu IP này có "tiền án" (high_risk_count > 0) thì đè thêm điểm phạt nặng hơn vào Risk tổng.
     if bf_history and bf_history ~= ngx.null then
         -- Parse history và count high-risk attempts
         local high_risk_count = 0
@@ -157,19 +170,14 @@ function _M.run(ctx)
     end
 
     -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
-    -- FIX 7: Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
-    -- [CRITICAL FIX] Nhưng nếu reputation >= 80 (permanent ban), không thêm điểm nữa
+    -- Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
+    -- Nhưng nếu reputation >= 80 (permanent ban), không thêm điểm nữa
     if base_risk > 50 and reputation < cfg.block_threshold then
         final_risk = math_min(final_risk + 10, MAX_RISK)
     end
 
-    -- [CRITICAL FIX v2] NO FORGIVENESS - Giữ nguyên điểm forever
-    -- Không bao giờ giảm điểm dù là 0.8x hay bất kỳ hệ số nào
-    -- IP càng nguy hiểm bị nhớ càng lâu, không có khoan hồng tự động
-    -- final_risk được tính từ reputation + base_risk, giữ nguyên không nhân hệ số
-
     -- =========================================================================
-    -- [FIX HIỆU NĂNG - ENTERPRISE STANDARD]: TỐI ƯU HÓA REDIS WRITE I/O
+    -- TỐI ƯU HÓA REDIS WRITE I/O
     -- Chỉ thực hiện ghi xuống Redis nếu:
     -- 1. IP này vừa gây ra rủi ro (final_risk > 0.01)
     -- 2. Hoặc IP này đang có "tiền án" và cần cập nhật lại điểm số (reputation > 0.01)
@@ -177,8 +185,10 @@ function _M.run(ctx)
     -- =========================================================================
     if final_risk >= 0.01 or reputation >= 0.01 then
         
-        -- FIX 4: Trừng phạt theo cấp độ - Kẻ càng nguy hiểm bị nhớ càng lâu
-        -- [CRITICAL FIX] Khi block (>= 80), TTL = 1 năm (vĩnh viễn block)
+        -- Trừng phạt theo cấp độ - Kẻ càng nguy hiểm bị nhớ càng lâu
+        -- Khi block (>= 80), TTL = 1 năm (vĩnh viễn block)
+        -- Dynamic TTL: Mức độ rủi ro quyết định thời gian IP bị lưu trữ.
+        -- Đạt 80 điểm -> Lưu vào Redis 1 năm (Ban vĩnh viễn cấp Database).
         local rep_ttl = 3600 -- Mặc định 1 giờ
         if final_risk >= cfg.block_threshold then
             rep_ttl = 31536000  -- Bị Block: Ghi nhớ 1 năm (vĩnh viễn) - Admin phải xóa thủ công
@@ -189,7 +199,9 @@ function _M.run(ctx)
         -- Ghi điểm Uy tín mới vào Redis
         red:set(key, string.format("%.2f", final_risk), "EX", rep_ttl)
 
-        -- [NEW FIX] Nếu block (final_risk >= 80), cũng thêm IP vào blacklist permanent
+        -- Nếu block (final_risk >= 80), cũng thêm IP vào blacklist permanent
+        -- Đồng bộ chéo với Blacklist. Hệ thống sẽ chặn ngay từ lớp ngoài cùng
+        -- ở các request kế tiếp, không cần phải chạy lại toàn bộ chain Security nữa.
         if final_risk >= cfg.block_threshold then
             red:sadd("blacklist_ips", ip)
             local bl_key = "blacklist:" .. ip
@@ -214,16 +226,18 @@ function _M.run(ctx)
     end
 
     -- ── DECISION (Quyết định hành động) ───────────────────────
+    -- ACTION CORE: Phán quyết cuối cùng của Risk Engine.
     if final_risk >= cfg.block_threshold then
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
         if metric_blocked then metric_blocked:inc(1, {"risk_block"}) end
         
         ctx.security.risk_action = "block"
         
-        -- [FIX]: Định nghĩa biến local ở đây để tránh lỗi nil
+        -- Định nghĩa biến local ở đây để tránh lỗi nil
         local attack_types_str = table.concat(signals, ", ")
         if attack_types_str == "" then attack_types_str = "unknown" end
         
+        -- Trực tiếp bắn Alert qua Telegram ngay khi một IP đạt ngưỡng Block.
         telegram_alert.send({
             ip = ip,
             attack_type = attack_types_str,
@@ -240,8 +254,9 @@ function _M.run(ctx)
 
     ctx.security.risk_final = final_risk
 
-    -- [FIX LOG]: Đẩy kết quả từ Lua ra biến Nginx để file access.log ghi nhận được 
+    -- Đẩy kết quả từ Lua ra biến Nginx để file access.log ghi nhận được 
     -- mà không làm lộ dữ liệu qua HTTP Response Header
+    -- Rất quan trọng để tích hợp với các hệ thống phân tích Log tập trung (ELK, Datadog...)
     ngx.var.log_risk_score = string.format("%.1f", final_risk)
     ngx.var.log_security_block = ctx.security.risk_action or "pass"
     

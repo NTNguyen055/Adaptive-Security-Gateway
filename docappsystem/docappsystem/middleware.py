@@ -15,7 +15,7 @@ from django.shortcuts import redirect
 
 logger = logging.getLogger("dasapp")
 
-# FIX 2: Đồng bộ 100% với danh sách PUBLIC_PATHS của jwt_auth.lua
+# Đồng bộ 100% với danh sách PUBLIC_PATHS của jwt_auth.lua
 _PUBLIC_PATHS = frozenset([
     "/",
     "/login/",
@@ -31,7 +31,7 @@ _PUBLIC_PATHS = frozenset([
     "/User_SearchAppointment/",  
 ])
 
-# FIX 2: Đồng bộ với WEB_PREFIXES_PATTERN của jwt_auth.lua
+# Đồng bộ với WEB_PREFIXES_PATTERN của jwt_auth.lua
 # Các prefix này sử dụng Session Cookie của Django thay vì JWT
 _WEB_PREFIXES = (
     "/static/", "/media/", "/admin/",
@@ -42,9 +42,8 @@ _WEB_PREFIXES = (
     "/profile/", "/password/", "/base/", "/logout/"
 )
 
-# FIX 3: Whitelist Role hợp lệ để chống Header Injection
+#  Whitelist Role hợp lệ để chống Header Injection
 _VALID_ROLES = frozenset(["user", "doctor", "admin", "patient", "manager", "nurse"])
-
 
 def _is_public(path: str) -> bool:
     """Trả về True nếu path là Public hoặc thuộc Giao diện Web (Không ép buộc JWT từ Gateway)."""
@@ -55,8 +54,6 @@ def _is_public(path: str) -> bool:
         return True
         
     return False
-
-
 class GatewayIdentityMiddleware:
     """
     Đọc identity headers từ OpenResty gateway.
@@ -91,7 +88,7 @@ class GatewayIdentityMiddleware:
             request.gateway_user_id   = None
             request.gateway_user_role = None
 
-        # FIX 1: Enforcement (Thực thi chặn đứng)
+        # Enforcement (Thực thi chặn đứng)
         # Nếu path này ĐÁNG LÝ phải là API (không nằm trong Public hay Web)
         # mà lại KHÔNG có ID từ Gateway truyền xuống -> Đích thị là bypass Gateway!
         if not _is_public(request.path) and request.gateway_user_id is None:

@@ -48,6 +48,8 @@ local function add_risk_reputation(ip, amount, red)
 
     local new_score = math.min(current + amount, 100)
     -- [CRITICAL FIX] Khi score >= 80, set TTL = 1 năm (vĩnh viễn block)
+    -- CORE: Thay vì khóa tạm thời, IP nào đạt mốc rủi ro nghiêm trọng (>= 80)
+    -- sẽ bị lưu điểm xấu vào Redis tận 1 năm. Gần như là cấm cửa vĩnh viễn cho đến khi Admin can thiệp.
     local ttl = 86400  -- Mặc định 24 giờ
     if new_score >= 80 then
         ttl = 31536000  -- 1 năm = block vĩnh viễn, admin phải xóa thủ công
@@ -80,6 +82,8 @@ local function add_ip_to_blacklist(ip, red)
 
     local blacklist_key = "blacklist:" .. ip
     -- [CRITICAL FIX] Khi brute-force block, blacklist = vĩnh viễn (1 năm)
+    -- Đẩy IP thẳng vào Blacklist của hệ thống. Đồng bộ cache nội bộ
+    -- (ngx.shared.ip_cache) để Nginx chặn ngay tại memory mà không cần gọi lại Redis ở các request sau.
     local bl_ttl = 31536000  -- 1 năm = vĩnh viễn block
     red:set(blacklist_key, "1", "EX", bl_ttl)
 
@@ -118,14 +122,17 @@ local function extract_login_info(ctx)
 end
 
 -- ============================================================
--- [NEW] HELPER: TRACK PERSISTENT ATTEMPTS ACROSS WINDOWS
+-- HELPER: TRACK PERSISTENT ATTEMPTS ACROSS WINDOWS
 -- Mục đích: Ghi nhận lịch sử brute-force để prevent reset exploit
 -- ============================================================
 local function track_persistent_attempt(ip, attempt_count, red)
     local cfg = get_config()
     local history_key = "brute_force:history:" .. ip
     
-    -- [FIX LỖI CHÍ MẠNG]: Xử lý an toàn biến ngx.null của Redis
+    -- Xử lý an toàn biến ngx.null của Redis
+    -- Chống lỗi crash Lua khi Redis trả về null. Việc lưu lại lịch sử
+    -- (history) nhằm phát hiện "Slow Brute-force" - loại tấn công cố tình dãn cách
+    -- thời gian đoán pass để lách luật window_time (5 phút).
     local history = red:get(history_key)
     if not history or history == ngx.null then
         history = ""
@@ -180,7 +187,7 @@ end
 
 -- ============================================================
 -- MAIN: SỰ KIỆN LOGIN THẤT BẠI
--- [NEW] Graduated Penalty: 3-strike warning system
+-- Graduated Penalty: 3-strike warning system
 -- ============================================================
 function _M.record_failed_attempt(ctx)
     local cfg = get_config()
@@ -211,8 +218,10 @@ function _M.record_failed_attempt(ctx)
         red:expire(fail_key, cfg.window_time)
     end
     
-    -- [FIX] Nếu vượt ngưỡng 5 lần, kéo dài TTL = lockout duration
+    -- Nếu vượt ngưỡng 5 lần, kéo dài TTL = lockout duration
     -- Điều này prevent IP từ reset counter giữa các window
+    -- CORE: Hacker thường spam 4 lần, chờ hết TTL (5 phút) rồi spam tiếp 4 lần.
+    -- Bằng cách kéo dài TTL bằng thời gian lockout, hệ thống triệt tiêu thủ thuật "reset exploit" này.
     if tonumber(attempt_count) >= cfg.max_attempts then
         red:expire(fail_key, cfg.cooldown_time)
     end
@@ -225,14 +234,17 @@ function _M.record_failed_attempt(ctx)
     ngx.log(ngx.WARN, "[BRUTE_FORCE] Failed login for IP ", ip, 
             " - attempt: ", attempt_count, "/", cfg.max_attempts)
 
-    -- [NEW] Track persistent history
+    -- Track persistent history
     track_persistent_attempt(ip, attempt_count, red)
 
     -- ============================================================
-    -- [NEW] GRADUATED PENALTY SYSTEM
+    -- GRADUATED PENALTY SYSTEM
     -- ============================================================
+    -- Hệ thống phạt tăng dần (Graduated Penalty). Không chặn ngay để tránh 
+    -- ảnh hưởng người dùng thật (lỡ tay gõ sai mật khẩu), nhưng tăng dần hình phạt.
     if tonumber(attempt_count) == 3 then
         -- Lần 3: Phát hiện pattern => Cảnh báo
+        -- Bật cờ challenge để các module sau bắt người dùng giải CAPTCHA.
         ctx.brute_force.action = "warn_level_1"
         ctx.brute_force.challenge = true
         
@@ -245,6 +257,7 @@ function _M.record_failed_attempt(ctx)
                 
     elseif tonumber(attempt_count) == 4 then
         -- Lần 4: Phạt +10 risk điểm (light penalty)
+        -- Bắt đầu tích lũy điểm Risk vào Security context.
         ctx.brute_force.action = "warn_level_2"
         ctx.brute_force.challenge = true
         
@@ -259,6 +272,7 @@ function _M.record_failed_attempt(ctx)
                 
     elseif tonumber(attempt_count) >= cfg.max_attempts then
         -- Lần 5+: Phạt +80 risk điểm + Lockout vĩnh viễn
+        -- ACTION CORE: Vượt ngưỡng max_attempts. Kích hoạt Block ngay lập tức.
         ctx.brute_force.action = "block"
         ctx.brute_force.exceed = true
         ctx.brute_force.block_now = true
@@ -284,6 +298,7 @@ function _M.record_failed_attempt(ctx)
         local permanent_ttl = 31536000  -- 1 năm
         red:set(lockout_key, "1", "EX", permanent_ttl)
 
+        -- Chặn cấp mạng (IP) và tăng điểm uy tín xấu cho IP.
         add_ip_to_blacklist(ip, red)
 
         local final_risk = add_risk_reputation(
@@ -300,6 +315,7 @@ function _M.record_failed_attempt(ctx)
             final_risk
         )
 
+        -- Gửi thông báo đến kênh Telegram cho Admin can thiệp.
         telegram_alert.send({
             ip = ip,
             attack_type = "Brute Force Login",
@@ -320,7 +336,7 @@ end
 
 -- ============================================================
 -- MAIN: SỰ KIỆN LOGIN THÀNH CÔNG
--- [FIX] Không reset counter ngay! Chỉ đánh dấu "success" để tracking
+-- Không reset counter ngay! Chỉ đánh dấu "success" để tracking
 -- ============================================================
 function _M.record_successful_login(ctx)
     local ip = ctx.client_ip or ngx.var.realip_remote_addr or ngx.var.remote_addr
@@ -333,6 +349,9 @@ function _M.record_successful_login(ctx)
 
     -- Không xóa fail counter! Chỉ ghi nhận success time
     -- Điều này cho phép tracking: "Người này từng sai nhiều, nhưng lần này thành công"
+    -- CORE: Rất nhiều hệ thống lỗi ở chỗ: Cứ đăng nhập thành công là reset counter sai về 0.
+    -- Attacker lợi dụng bằng cách chạy tool: Sai 4 lần => login acc thật của nó (thành công) => reset counter 
+    -- => Sai tiếp 4 lần. Bằng cách KHÔNG xóa counter ngay, ta ngăn chặn triệt để hình thức này.
     local fail_key = "brute_force:fail:" .. ip
     local success_key = "brute_force:success:" .. ip
     

@@ -9,7 +9,8 @@ local cjson    = require "cjson.safe" -- FIX 3: Dùng cjson để parse body JSO
 -- PATTERNS
 -- =============================================================================
 
--- FIX 1: Chống ReDoS. Đổi .{0,20} thành [^;]{0,20} để ngăn chặn Catastrophic Backtracking
+-- Các mẫu nhận diện SQL Injection. Việc dùng `[^;]` thay vì `.`
+-- giúp Engine không bị sập CPU khi hacker cố tình gửi các chuỗi truy vấn siêu dài để khai thác ReDoS.
 local SQLI_PATTERN = table.concat({
     [[\bunion\b[^;]{0,20}\bselect\b]],
     [[\bselect\b[^;]{0,30}\bfrom\b]],
@@ -27,6 +28,8 @@ local SQLI_PATTERN = table.concat({
     [[;\s*(?:drop|insert|delete|update)\b]],   
 }, "|")
 
+-- Các mẫu nhận diện Cross-Site Scripting (XSS). Nhắm vào thẻ <script>, iframe, 
+-- các hàm Javascript (alert, location) và các Event Handler (onload, onerror).
 local XSS_PATTERN = table.concat({
     [[<\s*script\b]],
     [[javascript\s*:]],
@@ -49,6 +52,8 @@ local XSS_PATTERN = table.concat({
 local function normalize(input)
     if not input then return "" end
 
+    -- Giải mã (Decode) URI 2 lần. Hacker thường dùng thủ thuật "Double Encoding"
+    -- (Ví dụ: Encode dấu `<` thành `%253c`) để qua mặt WAF chỉ quét 1 lớp.
     local ok1, decoded1 = pcall(ngx.unescape_uri, input)
     if ok1 then input = decoded1 end
 
@@ -56,13 +61,13 @@ local function normalize(input)
     if ok2 then input = decoded2 end
 
     input = input:lower()
+    -- Xóa comment SQL (`/*...*/`) và comment HTML (``) chèn giữa mã độc.
+    -- Ngăn chặn hacker ngắt nhỏ câu lệnh (Ví dụ: `sel/*...*/ect` -> `select`).
     input = input:gsub("/%*.-%*/", " ")
     input = input:gsub("<!%-%-.-%-%->", " ")
 
-    -- FIX 2: Decode HTML entity thành ký tự chuẩn thay vì dấu cách
-    -- LƯU Ý CHẤP NHẬN RỦI RO (Trade-off): Chỉ decode dải ASCII (32-255).
-    -- Unicode/Control chars ngoài dải này bị ép thành khoảng trắng. 
-    -- Điều này đủ để bắt 99% payload XSS thực tế mà vẫn giữ hiệu suất cao.
+    -- Dịch ngược các dạng Entity như `&#60;` hoặc `&#x3c;` trở lại dấu `<`
+    -- để Pattern Regex có thể bắt được.
     input = input:gsub("&#(%d+);", function(n)
         local num = tonumber(n)
         if num and num >= 32 and num <= 255 then return string.char(num) end
@@ -87,6 +92,8 @@ end
 local function check(value, ctx, source)
     if not value or value == "" then return false end
 
+    -- Cắt bớt độ dài chuỗi cần quét ở 8KB. Cân bằng giữa an toàn và tốc độ, 
+    -- tránh vắt kiệt RAM & CPU bởi các payload rác cực lớn.
     if #value > 8192 then value = value:sub(1, 8192) end
 
     local v = normalize(value)
@@ -94,9 +101,13 @@ local function check(value, ctx, source)
 
     -- ── SQLi ──────────────────────────────────────────────────
     if re_find(v, SQLI_PATTERN, "ijo") then
+        -- ACTION CORE: Gắn cờ bị chặn lập tức khi có SQLi và đẩy điểm rủi ro
+        -- thẳng lên 80 (chạm ngưỡng block của Risk Engine).
         ctx.security.waf_sqli = true
         ctx.security.block    = true   
         local base = 80
+        -- Combination Bonus: Tăng max 100 điểm nếu nhận diện được là Bot/Scanner
+        -- thực hiện cuộc tấn công này (phối hợp với module chống Bot).
         if ctx.security.bad_bot_scanner then base = math_min(base + 20, 100) end
         ctx.security.risk = math_min((ctx.security.risk or 0) + base, 100)
         table.insert(ctx.security.signals, "waf_sqli")
@@ -134,6 +145,8 @@ local function scan_args(args, ctx)
         if type(v) == "table" then
             -- NÂNG CẤP: Đệ quy thực sự (Full Recursive) để quét sâu vào các JSON 
             -- lồng nhau (nested objects), chặn bypass kiểu {"a": {"b": "<script>"}}
+            -- Rất quan trọng khi xử lý API trả JSON hiện đại. Không quét đệ quy
+            -- thì hacker giấu payload ở level 2, level 3 sẽ lọt qua.
             found = scan_args(v, ctx) or found
         elseif type(v) == "string" or type(v) == "number" then
             found = check(tostring(v), ctx, "data:" .. tostring(k)) or found
@@ -149,7 +162,9 @@ function _M.run(ctx)
     ctx.security         = ctx.security or {}
     ctx.security.signals = ctx.security.signals or {}
 
-    -- FIX 6: Gom toàn bộ kết quả quét thay vì return sớm (Ghi nhận Multiple Attacks)
+    -- Gom toàn bộ kết quả quét thay vì return sớm (Ghi nhận Multiple Attacks)
+    -- Không ngắt quãng khi tìm thấy lỗ hổng đầu tiên. Tiếp tục quét 
+    -- để lấy bằng chứng (signals) đầy đủ nhất gửi cho Risk Engine.
     local found = false
 
     -- ── 1. URI PATH & QUERY ───────────────────────────────────
@@ -159,12 +174,14 @@ function _M.run(ctx)
     if args then found = scan_args(args, ctx) or found end
 
     -- ── 2. HEADERS NGUY HIỂM ─────────────────────────────────
+    -- Quét các vùng mà hacker thường lợi dụng: User-Agent bẩn, 
+    -- Referer giả mạo, hoặc IP giả trong X-Forwarded-For.
     local headers = ngx.req.get_headers()
     found = check(headers["user-agent"],      ctx, "header:user-agent")    or found
     found = check(headers["referer"],         ctx, "header:referer")       or found
     found = check(headers["x-forwarded-for"], ctx, "header:xff")           or found
     
-    -- FIX 4 & 5: Bổ sung quét Cookie và Authorization Header
+    -- Bổ sung quét Cookie và Authorization Header
     found = check(headers["cookie"],          ctx, "header:cookie")        or found
     found = check(headers["authorization"],   ctx, "header:authorization") or found
 
@@ -174,9 +191,11 @@ function _M.run(ctx)
 
     local content_type = (headers["content-type"] or ""):lower()
 
-    -- [TỐI ƯU CẤU TRÚC] Đưa check Multipart lên trước để bảo vệ File Uploads
+    -- Đưa check Multipart lên trước để bảo vệ File Uploads
     if content_type:find("multipart/form-data", 1, true) then
         -- Bỏ qua quét Raw Body với file Multipart (Ảnh, Video...) để tránh False Positive.
+        -- Luồng tối ưu hóa quan trọng: Không được đem Data ảnh, Video đưa qua Regex WAF.
+        -- Tránh việc mã nhị phân vô tình trùng lặp chuỗi "select" hay "script" khiến request bị chặn nhầm.
         ngx.log(ngx.INFO, "[WAF] Skipped raw body scan for multipart data to prevent false positive")
         return
     end
@@ -195,14 +214,17 @@ function _M.run(ctx)
 
     if not body then return end
 
-    -- [VÁ LỖ HỔNG CHÍ MẠNG] Chống bypass bằng JSON Padding / Whitespace Injection
+    -- Chống bypass bằng JSON Padding / Whitespace Injection
     -- Payload không phải là file upload mà nặng hơn 1MB -> Chặn đứng lập tức
+    -- Bypass "bơm phồng": Kẻ tấn công tạo ra Body JSON với 2MB toàn ký tự trắng,
+    -- ép WAF cạn bộ nhớ hoặc bỏ qua quét do quá lớn. Code này xử lý cứng tình trạng đó bằng cách ngắt kết nối.
     if #body > 1024 * 1024 then
         local ip = (ctx.security and ctx.security.client_ip) or ngx.var.remote_addr
         ngx.log(ngx.WARN, "[WAF] Payload too large (", #body, " bytes) from ip=", ip, ", dropping request to prevent bypass")
         return ngx.exit(ngx.HTTP_REQUEST_ENTITY_TOO_LARGE) -- Trả về HTTP 413
     end
 
+    -- CORE: Phân giải (Parse) Body dựa theo loại Content-Type.
     if content_type:find("application/json", 1, true) then
         -- Parse cấu trúc JSON để quét chính xác từng trường (Tránh JSON escape bypass)
         local data = cjson.decode(body)

@@ -30,7 +30,7 @@ pipeline {
         DOCKERHUB_CREDS = credentials('dockerhub-cred-AGWS')
         EC2_SSH_CREDS   = 'app-server-ssh'
         
-        // FIX BẢO MẬT: Lấy IP từ két sắt Jenkins, ẩn hoàn toàn khỏi Log và Source Code
+        // Lấy IP từ két sắt Jenkins, ẩn hoàn toàn khỏi Log và Source Code
         EC2_APP_IP      = credentials('ec2-prod-ip') 
         
         EC2_USER        = 'ubuntu'
@@ -154,7 +154,7 @@ pipeline {
                         python -c "print('[SMOKE] Django image OK')"
                 '''
 
-                // 2. NÂNG CẤP: Test Nginx Syntax trực tiếp trên image vừa build (Chuẩn xác 100%)
+                // 2. Test Nginx Syntax trực tiếp trên image vừa build (Chuẩn xác 100%)
                 sh '''
                     echo "--- Validating nginx.conf syntax on built image ---"
                     # Bơm thêm host ảo để Nginx không bị lỗi phân giải DNS khi test
@@ -205,7 +205,7 @@ pipeline {
                 echo "🚢 [6/6] Deploying to EC2 (${EC2_APP_IP})..."
 
                 script {
-                    // FIX 8: Bỏ cơ chế replace chuỗi nguy hiểm, ghi thẳng ra file script nguyên bản
+                    // Bỏ cơ chế replace chuỗi nguy hiểm, ghi thẳng ra file script nguyên bản
                     def deployScript = '''\
 #!/usr/bin/env bash
 set -euo pipefail
@@ -221,11 +221,11 @@ mkdir -p "${BASE_DIR}"
 PREV_COMMIT="HEAD"
 
 if [ ! -d "${APP_DIR}/.git" ]; then
-    # FIX 2: Clone qua SSH (Bảo mật hơn HTTPS public)
+    # Clone qua SSH (Bảo mật hơn HTTPS public)
     git clone --depth 1 git@github.com:NTNguyen055/API-Security-Gateway.git "${APP_DIR}"
 else
     cd "${APP_DIR}"
-    # FIX 3: Ghi chú - Lệnh sudo này yêu cầu user ubuntu được cấu hình NOPASSWD
+    # Ghi chú - Lệnh sudo này yêu cầu user ubuntu được cấu hình NOPASSWD
     sudo chown -R $USER:$USER "${APP_DIR}" 2>/dev/null || true
     
     PREV_COMMIT=$(git rev-parse HEAD)
@@ -311,7 +311,7 @@ log "=================================================="
                 }
 
                 sshagent(credentials: [EC2_SSH_CREDS]) {
-                    // FIX BẢO MẬT (Chuẩn TOFU): Quét và lưu Host Key tự động, từ chối kết nối nếu bị MITM
+                    // (Chuẩn TOFU): Quét và lưu Host Key tự động, từ chối kết nối nếu bị MITM
                     sh """
                         # 1. Khởi tạo thư mục SSH bảo mật cho user jenkins
                         mkdir -p ~/.ssh
@@ -373,25 +373,13 @@ log "=================================================="
         success {
             echo "Pipeline #${BUILD_NUMBER} PASSED — ${APP_IMAGE}:${IMAGE_TAG} deployed"
             
-            // [NÂNG CẤP]: Thông báo Slack khi Thành công (Màu xanh)
-            // LƯU Ý: Cần cài đặt plugin "Slack Notification" trên Jenkins
-            // slackSend(color: 'good', message: "✅ [SUCCESS] Triển khai thành công ${env.JOB_NAME} #${env.BUILD_NUMBER}!\nPhiên bản: ${IMAGE_TAG}\nChi tiết: ${env.BUILD_URL}")
         }
         failure {
             echo "Pipeline #${BUILD_NUMBER} FAILED — ${BUILD_URL}console"
-            
-            // [NÂNG CẤP]: Gửi Alert khi Thất bại (Màu đỏ)
-            // Tùy chọn 1: Dùng Email (Cần cài Mailer Plugin)
-            // mail to: 'devsecops-team@yourdomain.com',
-            //      subject: "🚨 BÁO ĐỘNG ĐỎ: Pipeline ${env.JOB_NAME} thất bại!",
-            //      body: "Pipeline ${env.JOB_NAME} [${env.BUILD_NUMBER}] đã thất bại trong quá trình build/deploy. Vui lòng kiểm tra log ngay: ${env.BUILD_URL}console"
-
-            // Tùy chọn 2: Dùng Slack (Khuyên dùng)
-            // slackSend(color: 'danger', message: "🚨 *BÁO ĐỘNG ĐỎ*: Pipeline *${env.JOB_NAME}* [#${env.BUILD_NUMBER}] đã THẤT BẠI!\nVui lòng kiểm tra ngay: ${env.BUILD_URL}console")
-        }
+    
         unstable {
             echo "Pipeline #${BUILD_NUMBER} UNSTABLE"
-            // slackSend(color: 'warning', message: "⚠️ [WARNING] Pipeline ${env.JOB_NAME} [#${env.BUILD_NUMBER}] không ổn định (Unstable).")
+
         }
     }
 }

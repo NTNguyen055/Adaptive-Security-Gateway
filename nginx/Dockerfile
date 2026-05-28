@@ -1,6 +1,6 @@
 FROM openresty/openresty:alpine-fat
 
-# [FIX THEO REVIEW]: Thêm chuẩn OCI Labels để dễ dàng truy vết (Traceability)
+# Thêm chuẩn OCI Labels để dễ dàng truy vết (Traceability)
 ARG BUILD_DATE
 ARG COMMIT_SHA
 ARG VERSION
@@ -13,7 +13,6 @@ LABEL org.opencontainers.image.title="API Security Gateway" \
       org.opencontainers.image.version="${VERSION}"
 
 # ================= BASE =================
-# Cài đặt lại libmaxminddb-dev để cung cấp file libmaxminddb.so cho Lua FFI
 RUN apk add --no-cache \
     ca-certificates \
     libmaxminddb \
@@ -26,7 +25,6 @@ RUN apk add --no-cache \
     && update-ca-certificates
 
 # ================= LUA ROCKS =================
-# Chỉ cài 2 thư viện này qua Luarocks giống hệt file cũ của bạn đã chạy thành công
 RUN luarocks install lua-resty-jwt 0.2.3 \
     && luarocks install lua-resty-http 0.17.2
 
@@ -46,7 +44,7 @@ RUN openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
     -subj "/CN=dacn3.duckdns.org"
 
 # ================= COPY VENDOR =================
-# Bê nguyên xi thư mục vendor (chứa maxminddb, prometheus, v.v.) vào image
+# Đưa thư mục vendor (chứa maxminddb, prometheus, v.v.) vào image
 COPY vendor/resty/ /usr/local/openresty/lualib/resty/
 COPY vendor/prometheus*.lua /usr/local/openresty/lualib/
 
@@ -54,7 +52,7 @@ COPY vendor/prometheus*.lua /usr/local/openresty/lualib/
 COPY GeoLite2-Country.mmdb /etc/nginx/geoip/GeoLite2-Country.mmdb
 
 # ================= CONFIG & LUA SCRIPTS =================
-# Copy Nginx config và toàn bộ các file Lua siêu bảo mật mà chúng ta vừa nâng cấp
+# Copy Nginx config và toàn bộ các file Lua 
 COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY lua/ /usr/local/openresty/nginx/lua/
 

@@ -43,7 +43,6 @@ LABEL org.opencontainers.image.title="API Security App" \
       org.opencontainers.image.revision="${COMMIT_SHA}" \
       org.opencontainers.image.version="${VERSION}"
 
-# FIX 2: Bỏ PYTHONOPTIMIZE=1 để tránh lỗi ngầm nếu code (hoặc thư viện) dùng lệnh assert
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -54,7 +53,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     GUNICORN_THREADS=2 \
     GUNICORN_TIMEOUT=60
 
-# Chỉ cài runtime library, không cài -dev headers
+# Cài runtime library
 # libmariadb3  : shared library để mysqlclient chạy
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libmariadb3 \
