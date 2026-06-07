@@ -377,6 +377,7 @@ log "=================================================="
         failure {
             echo "Pipeline #${BUILD_NUMBER} FAILED — ${BUILD_URL}console"
     
+        }
         unstable {
             echo "Pipeline #${BUILD_NUMBER} UNSTABLE"
 
