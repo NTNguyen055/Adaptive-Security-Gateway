@@ -17,7 +17,7 @@ local function get_config()
     }
 end
 
--- FIX 1: Limiter Cache được lưu trữ ở cấp độ Worker
+-- Limiter Cache được lưu trữ ở cấp độ Worker
 -- LƯU Ý CHO ADMIN: Khi thay đổi thông số RATE_LIMIT_RPS trong .env, 
 -- phải chạy lại `docker-compose up -d --force-recreate gateway` để worker tải lại cache.
 local _limiter_cache = nil
@@ -52,7 +52,7 @@ local function auto_blacklist(ip, ctx)
     local count = counter_store:incr("rl:" .. ip, 1, 0, cfg.bl_window)
     if not count then return end
 
-    -- FIX 2: Sửa logic AND thành OR để chặn Spam thuần túy
+    -- Sửa logic AND thành OR để chặn Spam thuần túy
     -- Một IP spam sẽ bị chặn nếu VƯỢT THRESHOLD, 
     -- HOẶC nếu chưa vượt ngưỡng nhưng điểm Risk >= 50
     -- CORE: Liên kết với module Risk Engine. Nếu IP này vừa spam request, 
@@ -118,7 +118,7 @@ function _M.run(ctx)
                or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
 
-    -- FIX 4: Chỉ dùng IP làm Key (Bỏ URI)
+    -- Chỉ dùng IP làm Key (Bỏ URI)
     -- Lý do: Ngăn chặn Hacker Bypass Limit bằng cách liên tục thay đổi URI request
     -- Giới hạn áp dụng tổng quát cho MỌI endpoint. Hacker có đổi URL ngẫu nhiên
     -- (Ví dụ: /api/1, /api/2) thì IP của hắn vẫn bị cộng dồn và ăn block.
@@ -167,7 +167,6 @@ function _M.run(ctx)
         return
     end
 
-    -- FIX 5: Đã xóa dòng "rate_ok" để làm sạch Log, không ghi nhận các request bình thường.
 end
 
 return _M

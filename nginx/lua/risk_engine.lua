@@ -191,7 +191,7 @@ function _M.run(ctx)
         -- Đạt 80 điểm -> Lưu vào Redis 1 năm (Ban vĩnh viễn cấp Database).
         local rep_ttl = 3600 -- Mặc định 1 giờ
         if final_risk >= cfg.block_threshold then
-            rep_ttl = 31536000  -- Bị Block: Ghi nhớ 1 năm (vĩnh viễn) - Admin phải xóa thủ công
+            rep_ttl = 31536000  -- Bị Block: Ghi nhớ 1 năm
         elseif final_risk >= cfg.limit_threshold then
             rep_ttl = 7200   -- Bị Limit: Ghi nhớ 2 giờ
         end
