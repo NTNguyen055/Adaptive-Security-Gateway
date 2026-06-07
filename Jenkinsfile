@@ -221,8 +221,7 @@ mkdir -p "${BASE_DIR}"
 PREV_COMMIT="HEAD"
 
 if [ ! -d "${APP_DIR}/.git" ]; then
-    # Clone qua SSH (Bảo mật hơn HTTPS public)
-    git clone --depth 1 git@github.com:NTNguyen055/Adaptive-Security-Gateway.git "${APP_DIR}"
+    git clone --depth 1 https://github.com/NTNguyen055/Adaptive-Security-Gateway.git "${APP_DIR}"
 else
     cd "${APP_DIR}"
     # Ghi chú - Lệnh sudo này yêu cầu user ubuntu được cấu hình NOPASSWD
