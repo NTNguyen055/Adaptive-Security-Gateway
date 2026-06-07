@@ -5,7 +5,7 @@ ARG BUILD_DATE
 ARG COMMIT_SHA
 ARG VERSION
 
-LABEL org.opencontainers.image.title="API Security Gateway" \
+LABEL org.opencontainers.image.title="Adaptive Security Gateway" \
       org.opencontainers.image.description="OpenResty WAF & Security Gateway" \
       org.opencontainers.image.authors="NTNguyen055" \
       org.opencontainers.image.created="${BUILD_DATE}" \

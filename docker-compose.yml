@@ -4,7 +4,7 @@ services:
   # DJANGO APPLICATION
   # ===========================================================================
   app:
-    image: ntnguyen055/api-security-app:latest
+    image: ntnguyen055/adaptive-security-app:latest
     container_name: docapp_django
     restart: unless-stopped
 
@@ -105,7 +105,7 @@ services:
   # OPENRESTY GATEWAY
   # ===========================================================================
   gateway:
-    image: ntnguyen055/api-security-gateway:latest
+    image: ntnguyen055/adaptive-security-gateway:latest
     container_name: openresty_gateway
     restart: unless-stopped
 

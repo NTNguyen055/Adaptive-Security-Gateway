@@ -1,5 +1,5 @@
 // =============================================================================
-// Adaptive Web Security Gateway — Jenkinsfile
+// Adaptive Security Gateway — Jenkinsfile
 // Pipeline: Checkout → Lint → Build → Smoke Test → Push → Deploy → Verify
 // =============================================================================
 
@@ -20,8 +20,8 @@ pipeline {
     // ENVIRONMENT
     // =========================================================================
     environment {
-        APP_IMAGE = 'ntnguyen055/api-security-app'
-        GW_IMAGE  = 'ntnguyen055/api-security-gateway'
+        APP_IMAGE = 'ntnguyen055/adaptive-security-app'
+        GW_IMAGE  = 'ntnguyen055/adaptive-security-gateway'
         IMAGE_TAG = "v${BUILD_NUMBER}"
 
         DOCKER_BUILDKIT   = '1'
@@ -36,7 +36,7 @@ pipeline {
         EC2_USER        = 'ubuntu'
 
         BASE_DIR        = '/home/ubuntu/appointment-web'
-        APP_DIR         = '/home/ubuntu/appointment-web/API-Security-Gateway'
+        APP_DIR         = '/home/ubuntu/appointment-web/Adaptive-Security-Gateway'
         ENV_PATH        = '/home/ubuntu/appointment-web/.env'
 
         HEALTH_DOMAIN   = 'dacn3.duckdns.org'
@@ -222,7 +222,7 @@ PREV_COMMIT="HEAD"
 
 if [ ! -d "${APP_DIR}/.git" ]; then
     # Clone qua SSH (Bảo mật hơn HTTPS public)
-    git clone --depth 1 git@github.com:NTNguyen055/API-Security-Gateway.git "${APP_DIR}"
+    git clone --depth 1 git@github.com:NTNguyen055/Adaptive-Security-Gateway.git "${APP_DIR}"
 else
     cd "${APP_DIR}"
     # Ghi chú - Lệnh sudo này yêu cầu user ubuntu được cấu hình NOPASSWD

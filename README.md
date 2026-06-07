@@ -1,8 +1,8 @@
-# Hệ thống Đặt lịch hẹn Bác sĩ với Adaptive Web Security Gateway
+# Hệ thống Đặt lịch hẹn Bác sĩ với Adaptive Security Gateway
 
 ## Tổng quan
 
-Dự án này triển khai một **Hệ thống Đặt lịch hẹn Bác sĩ** tích hợp **Adaptive Web Security Gateway** sử dụng **OpenResty** và **Lua** nhằm phòng chống tấn công Layer 7. Hệ thống được xây dựng trên nền tảng **Docker** và **Cloud**, đảm bảo bảo mật, khả năng mở rộng và dễ triển khai.
+Dự án này triển khai một **Hệ thống Đặt lịch hẹn Bác sĩ** tích hợp **Adaptive Security Gateway** sử dụng **OpenResty** và **Lua** nhằm phòng chống tấn công Layer 7. Hệ thống được xây dựng trên nền tảng **Docker** và **Cloud**, đảm bảo bảo mật, khả năng mở rộng và dễ triển khai.
 
 ## Mục tiêu đề tài
 

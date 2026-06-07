@@ -36,7 +36,7 @@ ARG BUILD_DATE
 ARG COMMIT_SHA
 ARG VERSION
 
-LABEL org.opencontainers.image.title="API Security App" \
+LABEL org.opencontainers.image.title="Adaptive Security App" \
       org.opencontainers.image.description="Django Backend Application" \
       org.opencontainers.image.authors="NTNguyen055" \
       org.opencontainers.image.created="${BUILD_DATE}" \
