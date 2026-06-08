@@ -136,7 +136,7 @@ function _M.run(ctx)
     reputation = (reputation and reputation ~= ngx.null) and tonumber(reputation) or 0
 
     -- Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
-    -- [FIX] Cơ chế DECAY: Nếu request hiện tại sạch (base_risk = 0) và IP này không
+    -- Cơ chế DECAY: Nếu request hiện tại sạch (base_risk = 0) và IP này không
     -- trong permanent ban, áp dụng hệ số decay để giảm dần reputation theo thời gian.
     -- Mục đích: Tránh chặn vĩnh viễn các IP NAT/CGNAT mà nhiều user dùng chung.
     if cfg.decay_enabled and base_risk == 0 and reputation < cfg.block_threshold then
