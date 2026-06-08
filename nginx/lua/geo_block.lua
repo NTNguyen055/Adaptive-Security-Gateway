@@ -8,12 +8,25 @@ local geo = require "resty.maxminddb"
 -- =============================================================================
 
 -- Danh sách White-list: Các quốc gia được phép truy cập bình thường (Bypass block).
-local ALLOWED_COUNTRIES = {
-    ["VN"] = true,
-    ["US"] = true,
-    ["SG"] = true,
-    ["JP"] = true,
-}
+-- [FIX] Đọc từ biến môi trường GEO_ALLOWED_COUNTRIES (dạng "VN,US,SG,JP")
+-- thay vì hardcode trong code. Cho phép thay đổi không cần build lại image.
+-- Fallback về danh sách mặc định nếu biến không được set.
+local function build_allowed_countries()
+    local raw = os.getenv("GEO_ALLOWED_COUNTRIES") or ""
+    local t = {}
+    if raw ~= "" then
+        for code in raw:gmatch("[^,]+") do
+            local c = code:match("^%s*(.-)%s*$"):upper()
+            if #c == 2 then t[c] = true end
+        end
+    end
+    -- Fallback mặc định nếu env không set hoặc rỗng
+    if not next(t) then
+        t = { ["VN"] = true, ["US"] = true, ["SG"] = true, ["JP"] = true }
+    end
+    return t
+end
+local ALLOWED_COUNTRIES = build_allowed_countries()
 
 -- LEVEL 4: GEO multiplier (quan trọng)
 -- Hệ số nhân rủi ro dựa theo quốc gia. Các nước có tỷ lệ tấn công/spam cao (CN, RU, KP)
