@@ -6,6 +6,11 @@ local ngx      = ngx
 -- Alias hàm math.min để tối ưu hiệu năng.
 local math_min = math.min
 
+-- [FIX] Dùng SHA-256 thay cho MD5 để đồng nhất với jwt_auth.lua.
+-- MD5 có collision risk và không nên dùng dù chỉ cho cache key.
+local resty_sha256 = require "resty.sha256"
+local resty_str    = require "resty.string"
+
 -- Giới hạn độ dài User-Agent khi ghi log.
 -- Tránh log quá dài gây phình file error.log.
 local MAX_UA_LOG = 120
@@ -173,8 +178,12 @@ function _M.run(ctx)
     --
     local cache = ngx.shared.ua_cache
 
-    -- Tạo key cache bằng MD5 của UA.
-    local cache_key = "ua:" .. ngx.md5(ua_lower)
+    -- Tạo cache key bằng SHA-256 của UA (thay vì MD5 - nhất quán với jwt_auth.lua)
+    local sha256 = resty_sha256:new()
+    sha256:update(ua_lower)
+    local digest = sha256:final()
+    local ua_hash = resty_str.to_hex(digest)
+    local cache_key = "ua:" .. ua_hash
 
     if cache then
 

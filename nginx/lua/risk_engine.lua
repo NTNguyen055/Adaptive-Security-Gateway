@@ -15,6 +15,14 @@ local function get_config()
         -- Đạt 50 điểm sẽ bị Limit (giới hạn / Captcha), đạt 80 điểm sẽ bị Block (chặn hoàn toàn).
         block_threshold = tonumber(os.getenv("RISK_BLOCK_THRESHOLD")) or 80,
         limit_threshold = tonumber(os.getenv("RISK_LIMIT_THRESHOLD")) or 50,
+        -- [NEW] Cơ chế Decay: Giảm dần reputation score theo thời gian.
+        -- Mục đích: Tránh việc chặn vĩnh viễn các IP NAT/CGNAT chia sẻ (nhiều user dùng chung 1 IP).
+        -- RISK_DECAY_ENABLED=true  : Bật decay (khuyến nghị cho production có NAT)
+        -- RISK_DECAY_ENABLED=false : Tắt decay - No-Forgiveness policy (strict, chỉ dùng khi chắc chắn user-level IP)
+        decay_enabled = (os.getenv("RISK_DECAY_ENABLED") or "false"):lower() == "true",
+        -- Hệ số giảm: 0.1 = giảm 10% reputation hiện tại mỗi lần IP gửi request sạch
+        -- Ví dụ: reputation=60 + clean request → 60 * (1-0.1) = 54
+        decay_factor = tonumber(os.getenv("RISK_DECAY_FACTOR")) or 0.1,
     }
 end
 
@@ -128,10 +136,18 @@ function _M.run(ctx)
     reputation = (reputation and reputation ~= ngx.null) and tonumber(reputation) or 0
 
     -- Clamp (Chốt chặn max) ngay tại từng bước tính toán để logic rõ ràng
-    -- Nếu request sạch (base_risk = 0), giữ nguyên reputation
-    -- Nếu có signal mới, cộng thêm vào reputation
-    -- CORE (NO FORGIVENESS): Khác với các hệ thống cũ thường giảm điểm rủi ro theo thời gian (decay), 
-    -- hệ thống này cộng dồn chặt chẽ (reputation + base_risk). IP đã dính vết đen thì khó có cơ hội quay đầu.
+    -- [FIX] Cơ chế DECAY: Nếu request hiện tại sạch (base_risk = 0) và IP này không
+    -- trong permanent ban, áp dụng hệ số decay để giảm dần reputation theo thời gian.
+    -- Mục đích: Tránh chặn vĩnh viễn các IP NAT/CGNAT mà nhiều user dùng chung.
+    if cfg.decay_enabled and base_risk == 0 and reputation < cfg.block_threshold then
+        -- Chỉ decay khi request sạch hoàn toàn và chưa đạt ngưỡng permanent ban
+        reputation = reputation * (1 - cfg.decay_factor)
+        if reputation < 1 then reputation = 0 end  -- Floor về 0 khi gần sạch
+        ngx.log(ngx.INFO, "[RISK] DECAY applied for ip=", ip,
+            " reputation=", string.format("%.2f", reputation),
+            " (factor=", cfg.decay_factor, ")")
+    end
+
     local final_risk = math_min(reputation + base_risk, MAX_RISK)
     
     -- Nếu đã permanent ban (reputation >= 80), giữ nguyên 80 (không nhân bất kỳ hệ số)

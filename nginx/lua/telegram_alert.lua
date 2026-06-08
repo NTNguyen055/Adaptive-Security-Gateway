@@ -93,7 +93,9 @@ local function telegram_notify_timer(premature, bot_token, chat_id, text)
                 ["Content-Type"] = "application/json",
                 ["Host"] = "api.telegram.org"
             },
-            ssl_verify = false
+            -- [FIX] Bật xác thực chứng chỉ SSL. Giá trị false trước đây khiến
+            -- kết nối dễ bị tấn công MITM (Man-In-The-Middle) khi gọi Telegram API.
+            ssl_verify = true
         }
     )
 

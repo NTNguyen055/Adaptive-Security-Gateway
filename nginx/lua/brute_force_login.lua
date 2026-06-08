@@ -252,8 +252,11 @@ function _M.record_failed_attempt(ctx)
         ctx.security.signals = ctx.security.signals or {}
         table.insert(ctx.security.signals, "brute_force_warning:3_attempts")
         
-        ngx.log(ngx.WARN, "[BRUTE_FORCE] 3-strike warning for IP ", ip, 
-                " - consider adding CAPTCHA or 2FA")
+        -- [NOTE] CAPTCHA_ENABLED: Khi tích hợp CAPTCHA (hCaptcha/reCAPTCHA),
+        -- đọc biến ctx.brute_force.challenge = true tại đây để redirect về trang challenge.
+        -- Hiện tại chỉ log để operator biết có cảnh báo brute-force đang diễn ra.
+        ngx.log(ngx.WARN, "[BRUTE_FORCE] 3-strike CAPTCHA_CHALLENGE triggered for IP ", ip,
+                " - consider enabling CAPTCHA (set ctx.brute_force.challenge=true handled)")
                 
     elseif tonumber(attempt_count) == 4 then
         -- Lần 4: Phạt +10 risk điểm (light penalty)

@@ -115,8 +115,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      # Đổi thành map toàn bộ host để có thể check metrics từ ngoài nếu cần (Tùy chọn)
-      - "9145:9145"
+      # [FIX] Bind metrics port chỉ trên localhost để ngăn truy cập từ Internet.
+      # Prometheus container trong cùng network 'internal' vẫn có thể scrape được.
+      - "127.0.0.1:9145:9145"
 
     env_file:
       - /home/ubuntu/appointment-web/.env
@@ -172,8 +173,14 @@ services:
     container_name: grafana
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # [FIX] Lấy credentials từ .env thay vì hardcode 'admin/admin'.
+      # Thiết lập GRAFANA_ADMIN_PASSWORD mạnh trong file .env trước khi deploy.
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      # Disable sign-up cho user mới để khóa cửớng Grafana khỏi Internet
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Chỉ cho phép đăng nhập qua local browser (không có OAuth public)
+      - GF_AUTH_ANONYMOUS_ENABLED=false
     volumes:
       - grafana_data:/var/lib/grafana
     ports:

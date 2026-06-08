@@ -24,6 +24,12 @@ RUN apk add --no-cache \
     && echo "Asia/Ho_Chi_Minh" > /etc/timezone \
     && update-ca-certificates
 
+# ================= NON-ROOT USER =================
+# Tạo user không có quyền root để giảm attack surface nếu gateway bị compromise.
+# UID/GID cố định 101 để volume permissions nhất quán giữa các lần build.
+RUN addgroup -g 101 -S gateway \
+    && adduser -u 101 -S -G gateway -H -D gateway
+
 # ================= LUA ROCKS =================
 RUN luarocks install lua-resty-jwt 0.2.3 \
     && luarocks install lua-resty-http 0.17.2
@@ -57,10 +63,20 @@ COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY lua/ /usr/local/openresty/nginx/lua/
 
 # ================= PERMISSION =================
-RUN chmod -R 755 /usr/local/openresty/
+# Giao quyền sở hữu thư mục log và config cho user gateway (non-root)
+# Nginx master process vẫn cần bind port 80/443 nên phải chạy root ở init,
+# nhưng worker processes sẽ chạy dưới user 'gateway' (được cấu hình trong nginx.conf)
+RUN chown -R gateway:gateway /usr/local/openresty/nginx/logs \
+    && chown -R gateway:gateway /usr/local/openresty/nginx/lua \
+    && chmod -R 755 /usr/local/openresty/nginx/logs \
+    && chmod 644 /usr/local/openresty/nginx/conf/nginx.conf \
+    && chmod -R 644 /usr/local/openresty/nginx/lua/ \
+    && find /usr/local/openresty/nginx/lua/ -type d -exec chmod 755 {} \;
 
 # ================= PORT =================
 EXPOSE 80 443 9145
 
 # ================= RUN =================
+# NOTE: OpenResty master process hợp lệ phải chạy root để bind port 80/443.
+# Worker processes sẽ drop xuống user 'gateway' theo cấu hình 'user gateway;' trong nginx.conf.
 CMD ["openresty", "-g", "daemon off;"]
