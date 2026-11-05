@@ -2,24 +2,19 @@
 from multiprocessing import context
 from django.shortcuts import render, redirect, HttpResponse
 
-# Decorator yêu cầu người dùng phải đăng nhập mới được truy cập view
 from django.contrib.auth.decorators import login_required
-
-# Import các model từ app dasapp
 from dasapp.models import DoctorReg, Specialization, CustomUser, Appointment
-
-# Import hệ thống message để hiển thị thông báo (success, warning, error)
 from django.contrib import messages
-
-# Import thư viện phân trang
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 
-# Import datetime để xử lý ngày tháng
 from datetime import datetime
 
-# FIX: Import thêm Q object để xử lý các câu lệnh truy vấn phức tạp (OR/AND) an toàn
-from django.db.models import Q 
-
+from django.db.models import Q
+from django.shortcuts import get_object_or_404
+from django.http import HttpResponseForbidden
+from django.http import HttpResponse, HttpResponseBadRequest
+from django.views.decorators.http import require_POST
+from .permissions import doctor_required
 
 # View đăng ký bác sĩ
 def DOCSIGNUP(request):
@@ -72,7 +67,7 @@ def DOCSIGNUP(request):
 
 
 # Trang dashboard chính của bác sĩ
-@login_required(login_url='/')
+@doctor_required
 def DOCTORHOME(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -94,6 +89,7 @@ def DOCTORHOME(request):
 
 
 # Xem danh sách lịch hẹn của bác sĩ
+@doctor_required
 def View_Appointment(request):
     try:
         doctor_admin = request.user
@@ -122,31 +118,65 @@ def View_Appointment(request):
 
 
 # Xem chi tiết lịch hẹn của bệnh nhân
+@doctor_required
+@login_required(login_url="/login/")
 def Patient_Appointment_Details(request, id):
-    patientdetails = Appointment.objects.filter(id=id)
-    context = {'patientdetails': patientdetails}
-    return render(request, 'doc/patient_appointment_details.html', context)
+    # Chỉ tài khoản bác sĩ mới được truy cập.
+    if str(request.user.user_type) != "2":
+        return HttpResponseForbidden("Forbidden")
+
+    # Chỉ cho phép bác sĩ xem lịch hẹn thuộc về mình.
+    appointment = get_object_or_404(
+        Appointment,
+        id=id,
+        doctor_id__admin=request.user,
+    )
+
+    return render(
+        request,
+        "doc/patient_appointment_details.html",
+        {"patientdetails": [appointment]},
+    )
 
 
 # Cập nhật trạng thái lịch hẹn và ghi chú
+@doctor_required
+@require_POST
 def Patient_Appointment_Details_Remark(request):
-    if request.method == 'POST':
-        patient_id = request.POST.get('pat_id')
-        remark = request.POST['remark']
-        status = request.POST['status']
+    patient_id = request.POST.get("pat_id", "")
+    remark = request.POST.get("remark", "").strip()
+    status = request.POST.get("status", "")
 
-        patientaptdet = Appointment.objects.get(id=patient_id)
-        patientaptdet.remark = remark
-        patientaptdet.status = status
-        patientaptdet.save()
+    if not patient_id.isascii() or not patient_id.isdigit():
+        return HttpResponseBadRequest("Invalid appointment ID")
 
-        messages.success(request, "Status Update successfully")
-        return redirect('view_appointment')
+    if not remark or len(remark) > 250:
+        return HttpResponseBadRequest("Invalid remark")
 
-    return render(request, 'doc/view_appointment.html', {})
+    if status not in {"Approved", "Cancelled"}:
+        return HttpResponseBadRequest("Invalid status")
 
+    appointment = get_object_or_404(
+        Appointment,
+        id=patient_id,
+        doctor_id__admin=request.user,
+    )
+
+    if appointment.status != "0":
+        return HttpResponse(
+            "Invalid appointment state",
+            status=409,
+        )
+
+    appointment.remark = remark
+    appointment.status = status
+    appointment.save(update_fields=["remark", "status"])
+
+    messages.success(request, "Status Update successfully")
+    return redirect("view_appointment")
 
 # Xem danh sách lịch hẹn đã duyệt
+@doctor_required
 def Patient_Approved_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -155,8 +185,8 @@ def Patient_Approved_Appointment(request):
     context = {'patientdetails1': patientdetails1}
     return render(request, 'doc/patient_app_appointment.html', context)
 
-
 # Xem danh sách lịch hẹn đã hủy
+@doctor_required
 def Patient_Cancelled_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -165,8 +195,8 @@ def Patient_Cancelled_Appointment(request):
     context = {'patientdetails1': patientdetails1}
     return render(request, 'doc/patient_app_appointment.html', context)
 
-
 # Xem danh sách lịch hẹn mới
+@doctor_required
 def Patient_New_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -175,8 +205,8 @@ def Patient_New_Appointment(request):
     context = {'patientdetails1': patientdetails1}
     return render(request, 'doc/patient_app_appointment.html', context)
 
-
 # Xem danh sách lịch hẹn đã duyệt (dạng list khác)
+@doctor_required
 def Patient_List_Approved_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -185,35 +215,68 @@ def Patient_List_Approved_Appointment(request):
     context = {'patientdetails1': patientdetails1}
     return render(request, 'doc/patient_list_app_appointment.html', context)
 
-
 # Xem chi tiết lịch hẹn
+@doctor_required
 def DoctorAppointmentList(request, id):
-    patientdetails = Appointment.objects.filter(id=id)
-    context = {'patientdetails': patientdetails}
-    return render(request, 'doc/doctor_appointment_list_details.html', context)
+    appointment = get_object_or_404(
+        Appointment,
+        pk=id,
+        doctor_id__admin=request.user,
+    )
 
+    return render(
+        request,
+        "doc/doctor_appointment_list_details.html",
+        {"patientdetails": [appointment]},
+    )
 
 # Cập nhật đơn thuốc và xét nghiệm
+@doctor_required
+@require_POST
 def Patient_Appointment_Prescription(request):
-    if request.method == 'POST':
-        patient_id = request.POST.get('pat_id')
-        prescription = request.POST['prescription']
-        recommendedtest = request.POST['recommendedtest']
-        status = request.POST['status']
+    patient_id = request.POST.get("pat_id", "")
+    prescription = request.POST.get("prescription", "").strip()
+    recommendedtest = request.POST.get("recommendedtest", "").strip()
+    status = request.POST.get("status", "")
 
-        patientaptdet = Appointment.objects.get(id=patient_id)
-        patientaptdet.prescription = prescription
-        patientaptdet.recommendedtest = recommendedtest
-        patientaptdet.status = status
-        patientaptdet.save()
+    if not patient_id.isascii() or not patient_id.isdigit():
+        return HttpResponseBadRequest("Invalid appointment ID")
 
-        messages.success(request, "Status Update successfully")
-        return redirect('view_appointment')
+    if not prescription or not recommendedtest:
+        return HttpResponseBadRequest("Missing prescription data")
 
-    return render(request, 'doc/patient_list_app_appointment.html', {})
+    if status != "Completed":
+        return HttpResponseBadRequest("Invalid status")
 
+    appointment = get_object_or_404(
+        Appointment,
+        id=patient_id,
+        doctor_id__admin=request.user,
+    )
+
+    if appointment.status != "Approved":
+        return HttpResponse(
+            "Invalid appointment state",
+            status=409,
+        )
+
+    appointment.prescription = prescription
+    appointment.recommendedtest = recommendedtest
+    appointment.status = "Completed"
+
+    appointment.save(
+        update_fields=[
+            "prescription",
+            "recommendedtest",
+            "status",
+        ]
+    )
+
+    messages.success(request, "Status Update successfully")
+    return redirect("view_appointment")
 
 # Xem lịch hẹn đã hoàn thành
+@doctor_required
 def Patient_Appointment_Completed(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -222,8 +285,8 @@ def Patient_Appointment_Completed(request):
     context = {'patientdetails1': patientdetails1}
     return render(request, 'doc/patient_list_app_appointment.html', context)
 
-
 # Tìm kiếm lịch hẹn theo tên hoặc mã lịch hẹn
+@doctor_required
 def Search_Appointments(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -245,8 +308,8 @@ def Search_Appointments(request):
         else:
             return render(request, 'doc/search-appointment.html', {})
 
-
 # Báo cáo lịch hẹn theo khoảng ngày
+@doctor_required
 def Between_Date_Report(request):
     start_date = request.GET.get('start_date')
     end_date = request.GET.get('end_date')
