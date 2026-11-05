@@ -16,55 +16,108 @@ from django.http import HttpResponse, HttpResponseBadRequest
 from django.views.decorators.http import require_POST
 from .permissions import doctor_required
 
+from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.contrib.auth.password_validation import validate_password
+from django.views.decorators.http import require_http_methods
+
 # View đăng ký bác sĩ
+@require_http_methods(["GET", "POST"])
 def DOCSIGNUP(request):
-    specialization = Specialization.objects.all()
+    specializations = Specialization.objects.all()
 
     if request.method == "POST":
-        pic = request.FILES.get('pic')
-        first_name = request.POST.get('first_name')
-        last_name = request.POST.get('last_name')
-        username = request.POST.get('username')
-        email = request.POST.get('email')
-        mobno = request.POST.get('mobno')
-        specialization_id = request.POST.get('specialization_id')
-        password = request.POST.get('password')
+        pic = request.FILES.get("pic")
+        first_name = (request.POST.get("first_name") or "").strip()
+        last_name = (request.POST.get("last_name") or "").strip()
+        username = (request.POST.get("username") or "").strip()
+        email = (request.POST.get("email") or "").strip()
+        mobno = (request.POST.get("mobno") or "").strip()
+        specialization_id = request.POST.get("specialization_id", "")
+        password = request.POST.get("password") or ""
 
-        if CustomUser.objects.filter(email=email).exists():
-            messages.warning(request, 'Email already exist')
-            return redirect('docsignup')
+        # Kiểm tra các trường bắt buộc.
+        if not all([
+            pic, first_name, last_name, username,
+            email, mobno, specialization_id, password,
+        ]):
+            return HttpResponseBadRequest("Missing required fields")
 
-        if CustomUser.objects.filter(username=username).exists():
-            messages.warning(request, 'Username already exist')
-            return redirect('docsignup')
+        if (
+            not mobno.isascii()
+            or not mobno.isdigit()
+            or not 9 <= len(mobno) <= 11
+        ):
+            return HttpResponseBadRequest("Invalid phone number")
 
-        else:
-            user = CustomUser(
-               first_name=first_name,
-               last_name=last_name,
-               username=username,
-               email=email,
-               user_type=2,
-               profile_pic=pic,
+        # Xác minh chuyên khoa trước khi tạo tài khoản.
+        if (
+            not specialization_id.isascii()
+            or not specialization_id.isdigit()
+        ):
+            return HttpResponseBadRequest("Invalid specialization")
+
+        specialization = Specialization.objects.filter(
+            pk=int(specialization_id)
+        ).first()
+
+        if specialization is None:
+            return HttpResponseBadRequest("Invalid specialization")
+
+        if CustomUser.objects.filter(
+            email__iexact=email
+        ).exists():
+            messages.warning(request, "Email already exists")
+            return redirect("docsignup")
+
+        if CustomUser.objects.filter(
+            username__iexact=username
+        ).exists():
+            messages.warning(request, "Username already exists")
+            return redirect("docsignup")
+
+        user = CustomUser(
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+            email=email,
+            user_type="2",
+            is_active=False,
+            profile_pic=pic,
+        )
+
+        user.set_password(password)
+
+        try:
+            validate_password(password, user=user)
+            user.full_clean()
+        except ValidationError:
+            return HttpResponseBadRequest(
+                "Invalid registration information"
             )
-            user.set_password(password)
+
+        # Tạo đồng thời user và hồ sơ bác sĩ trong database.
+        with transaction.atomic():
             user.save()
 
-            spid = Specialization.objects.get(id=specialization_id)
-            doctor = DoctorReg(
+            DoctorReg.objects.create(
                 admin=user,
                 mobilenumber=mobno,
-                specialization_id=spid,
+                specialization_id=specialization,
             )
-            doctor.save()
-            messages.success(request, 'Signup Successfully')
-            return redirect('docsignup')
 
-    context = {
-        'specialization': specialization
-    }
-    return render(request, 'doc/docreg.html', context)
+        messages.success(
+            request,
+            "Registration received. "
+            "Please wait for administrator approval.",
+        )
+        return redirect("docsignup")
 
+    return render(
+        request,
+        "doc/docreg.html",
+        {"specialization": specializations},
+    )
 
 # Trang dashboard chính của bác sĩ
 @doctor_required
@@ -86,7 +139,6 @@ def DOCTORHOME(request):
         'comaptcount': comaptcount
     }
     return render(request, 'doc/dochome.html', context)
-
 
 # Xem danh sách lịch hẹn của bác sĩ
 @doctor_required
@@ -116,7 +168,6 @@ def View_Appointment(request):
 
     return render(request, 'doc/view_appointment.html', context)
 
-
 # Xem chi tiết lịch hẹn của bệnh nhân
 @doctor_required
 @login_required(login_url="/login/")
@@ -137,7 +188,6 @@ def Patient_Appointment_Details(request, id):
         "doc/patient_appointment_details.html",
         {"patientdetails": [appointment]},
     )
-
 
 # Cập nhật trạng thái lịch hẹn và ghi chú
 @doctor_required

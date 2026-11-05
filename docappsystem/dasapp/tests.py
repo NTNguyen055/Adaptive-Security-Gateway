@@ -4,10 +4,20 @@ from unittest.mock import patch
 from django.contrib.auth.models import AnonymousUser
 from django.http import Http404
 from django.test import RequestFactory, SimpleTestCase
+from django.test import Client
 
+from dasapp.models import Page
 from dasapp.models import Appointment
 from docappsystem.docviews import Patient_Appointment_Details
 from django.urls import reverse
+
+from io import BytesIO
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from PIL import Image
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 
 class DoctorAppointmentAuthorizationTests(SimpleTestCase):
 
@@ -559,3 +569,437 @@ class AdminEndpointRoleCoverageTests(TestCase):
             with self.subTest(url=url):
                 response = self.client.post(url, {})
                 self.assertEqual(response.status_code, 403)
+
+class AdminSpecializationValidationTests(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = CustomUser.objects.create_user(
+            username="validation_admin",
+            password="test-password",
+            user_type="1",
+        )
+        cls.specialization = Specialization.objects.create(
+            sname="Original Name",
+        )
+
+    def setUp(self):
+        self.client.force_login(self.admin)
+
+    def test_create_valid_specialization(self):
+        response = self.client.post(
+            reverse("add_specilizations"),
+            {"specializationname": "  Cardiology  "},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            Specialization.objects.filter(
+                sname="Cardiology"
+            ).exists()
+        )
+
+    def test_create_rejects_invalid_names(self):
+        original_count = Specialization.objects.count()
+
+        for name in ["   ", "X" * 201]:
+            with self.subTest(name_length=len(name)):
+                response = self.client.post(
+                    reverse("add_specilizations"),
+                    {"specializationname": name},
+                )
+                self.assertEqual(response.status_code, 400)
+
+        self.assertEqual(
+            Specialization.objects.count(),
+            original_count,
+        )
+
+    def test_update_rejects_get(self):
+        response = self.client.get(
+            reverse("update_specilizations_details")
+        )
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_update_rejects_invalid_id(self):
+        response = self.client.post(
+            reverse("update_specilizations_details"),
+            {"sep_id": "invalid", "sname": "Updated"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_rejects_invalid_names(self):
+        for name in [" ", "X" * 201]:
+            with self.subTest(name_length=len(name)):
+                response = self.client.post(
+                    reverse("update_specilizations_details"),
+                    {
+                        "sep_id": self.specialization.pk,
+                        "sname": name,
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+
+        self.specialization.refresh_from_db()
+        self.assertEqual(
+            self.specialization.sname,
+            "Original Name",
+        )
+
+    def test_update_valid_specialization(self):
+        response = self.client.post(
+            reverse("update_specilizations_details"),
+            {
+                "sep_id": self.specialization.pk,
+                "sname": "  Updated Name  ",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.specialization.refresh_from_db()
+        self.assertEqual(
+            self.specialization.sname,
+            "Updated Name",
+        )
+
+    def test_csrf_rejects_post_without_token(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+
+        response = csrf_client.post(
+            reverse("add_specilizations"),
+            {"specializationname": "Unauthorized Creation"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(
+            Specialization.objects.filter(
+                sname="Unauthorized Creation"
+            ).exists()
+        )
+
+class AdminWebsiteUpdateTests(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = CustomUser.objects.create_user(
+            username="website_admin",
+            password="test-password",
+            user_type="1",
+        )
+
+        cls.page = Page.objects.create(
+            pagetitle="Original Title",
+            address="Original Address",
+            aboutus="Original About",
+            email="original@example.com",
+            mobilenumber="0123456789",
+        )
+
+    def setUp(self):
+        self.client.force_login(self.admin)
+        self.url = reverse("update_website_details")
+
+    def valid_data(self):
+        return {
+            "web_id": str(self.page.pk),
+            "pagetitle": "Updated Title",
+            "address": "Updated Address",
+            "aboutus": "Updated About",
+            "email": "updated@example.com",
+            "mobilenumber": "0987654321",
+        }
+
+    def test_valid_update(self):
+        response = self.client.post(
+            self.url, self.valid_data()
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        self.page.refresh_from_db()
+        self.assertEqual(self.page.pagetitle, "Updated Title")
+        self.assertEqual(self.page.email, "updated@example.com")
+
+    def test_reject_get(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 405)
+
+    def test_reject_invalid_id(self):
+        data = self.valid_data()
+        data["web_id"] = "invalid"
+
+        response = self.client.post(self.url, data)
+        self.assertEqual(response.status_code, 400)
+
+    def test_reject_invalid_fields(self):
+        for field, value in [
+            ("pagetitle", ""),
+            ("email", "invalid-email"),
+            ("mobilenumber", "1" * 16),
+        ]:
+            with self.subTest(field=field):
+                data = self.valid_data()
+                data[field] = value
+
+                response = self.client.post(self.url, data)
+                self.assertEqual(response.status_code, 400)
+
+        self.page.refresh_from_db()
+        self.assertEqual(self.page.pagetitle, "Original Title")
+
+    def test_nonexistent_page_returns_404(self):
+        data = self.valid_data()
+        data["web_id"] = "999999"
+
+        response = self.client.post(self.url, data)
+        self.assertEqual(response.status_code, 404)
+
+    def test_csrf_rejects_missing_token(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+
+        response = csrf_client.post(
+            self.url, self.valid_data()
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+        self.page.refresh_from_db()
+        self.assertEqual(self.page.pagetitle, "Original Title")
+
+class DoctorRegistrationApprovalTests(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.specialization = Specialization.objects.create(
+            sname="Registration Test",
+        )
+
+    def setUp(self):
+        self.media_dir = TemporaryDirectory()
+        self.addCleanup(self.media_dir.cleanup)
+
+        self.media_settings = override_settings(
+            MEDIA_ROOT=self.media_dir.name,
+        )
+        self.media_settings.enable()
+        self.addCleanup(self.media_settings.disable)
+
+        self.password = "Strong-2026-Test!Xp"
+        self.email = "pending@example.invalid"
+        self.username = "doctor_pending"
+
+    def signup_data(self):
+        image_buffer = BytesIO()
+        Image.new("RGB", (1, 1), "white").save(
+            image_buffer, format="PNG"
+        )
+
+        return {
+            "first_name": "An",
+            "last_name": "Nguyen",
+            "username": self.username,
+            "email": self.email,
+            "mobno": "0123456789",
+            "specialization_id": str(self.specialization.pk),
+            "password": self.password,
+            "pic": SimpleUploadedFile(
+                "doctor.png",
+                image_buffer.getvalue(),
+                content_type="image/png",
+            ),
+        }
+
+    def register_doctor(self):
+        response = self.client.post(
+            reverse("docsignup"),
+            self.signup_data(),
+        )
+        self.assertEqual(response.status_code, 302)
+
+        return CustomUser.objects.get(username=self.username)
+
+    def test_signup_creates_inactive_doctor(self):
+        user = self.register_doctor()
+
+        self.assertEqual(user.user_type, "2")
+        self.assertFalse(user.is_active)
+        self.assertTrue(user.check_password(self.password))
+
+        self.assertTrue(
+            DoctorReg.objects.filter(
+                admin=user,
+                specialization_id=self.specialization,
+            ).exists()
+        )
+
+    def test_inactive_doctor_cannot_login(self):
+        self.register_doctor()
+
+        response = self.client.post(
+            reverse("doLogin"),
+            {
+                "email": self.email,
+                "password": self.password,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_activated_doctor_can_login(self):
+        user = self.register_doctor()
+
+        # Mô phỏng quyết định kích hoạt của quản trị viên.
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+
+        with patch("docappsystem.views.record_login_attempt"):
+            response = self.client.post(
+                reverse("doLogin"),
+                {
+                    "email": self.email,
+                    "password": self.password,
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            self.client.session["_auth_user_id"],
+            str(user.pk),
+        )
+
+    def test_invalid_specialization_creates_no_user(self):
+        data = self.signup_data()
+        data["specialization_id"] = "999999"
+
+        response = self.client.post(
+            reverse("docsignup"),
+            data,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(
+            CustomUser.objects.filter(
+                username=self.username
+            ).exists()
+        )
+
+    def test_missing_fields_rejected(self):
+        response = self.client.post(
+            reverse("docsignup"),
+            {"username": self.username},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(
+            CustomUser.objects.filter(
+                username=self.username
+            ).exists()
+        )
+
+class DoctorApprovalWorkflowTests(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = CustomUser.objects.create_user(
+            username="approval_admin",
+            password="test-password",
+            user_type="1",
+        )
+
+        cls.doctor_user = CustomUser.objects.create_user(
+            username="approval_doctor",
+            password="test-password",
+            user_type="2",
+            is_active=False,
+        )
+
+        cls.specialization = Specialization.objects.create(
+            sname="Approval Test"
+        )
+
+        cls.doctor = DoctorReg.objects.create(
+            admin=cls.doctor_user,
+            mobilenumber="0123456789",
+            specialization_id=cls.specialization,
+        )
+
+    def setUp(self):
+        self.url = reverse(
+            "approve_doctor",
+            args=[self.doctor.pk],
+        )
+
+    def test_admin_can_approve_doctor(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 302)
+        self.doctor_user.refresh_from_db()
+        self.assertTrue(self.doctor_user.is_active)
+
+    def test_anonymous_cannot_approve(self):
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response["Location"])
+
+        self.doctor_user.refresh_from_db()
+        self.assertFalse(self.doctor_user.is_active)
+
+    def test_doctor_cannot_approve(self):
+        other_doctor = CustomUser.objects.create_user(
+            username="approval_other_doctor",
+            password="test-password",
+            user_type="2",
+        )
+        self.client.force_login(other_doctor)
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 403)
+
+        self.doctor_user.refresh_from_db()
+        self.assertFalse(self.doctor_user.is_active)
+
+    def test_approve_rejects_get(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_cannot_approve_twice(self):
+        self.client.force_login(self.admin)
+
+        self.doctor_user.is_active = True
+        self.doctor_user.save(update_fields=["is_active"])
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_nonexistent_doctor_returns_404(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.post(
+            reverse("approve_doctor", args=[999999])
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_csrf_rejects_approval_without_token(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+
+        response = csrf_client.post(self.url)
+
+        self.assertEqual(response.status_code, 403)
+
+        self.doctor_user.refresh_from_db()
+        self.assertFalse(self.doctor_user.is_active)
