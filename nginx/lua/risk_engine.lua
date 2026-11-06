@@ -114,6 +114,77 @@ function _M.run(ctx)
 
     base_risk = math_min(base_risk + bonus, MAX_RISK)
 
+    -- Không ghi hình phạt IP dài hạn chỉ vì request thiếu JWT.
+    -- Vẫn cho phép xử lý bình thường nếu có tín hiệu tấn công
+    -- độc lập với việc thiếu token.
+    local independent_abuse =
+        ctx.security.waf_sqli
+        or ctx.security.waf_xss
+        or ctx.security.rate_limit_hard
+        or ctx.security.redis_rate_exceeded
+        or ctx.security.bad_bot_scanner
+        or ctx.security.xff_spoof
+        or ctx.security.xff_chain_abuse
+        or ctx.security.brute_force_attack
+
+    if ctx.security.jwt_missing and not independent_abuse then
+        ctx.security.block = true
+        ctx.security.risk_action = "block"
+        ctx.security.risk_final = base_risk
+
+        ngx.var.log_risk_score =
+            string.format("%.1f", base_risk)
+
+        ngx.var.log_security_block = "block"
+
+        return
+    end
+
+    -- ============================================================
+    -- CONTEXT-ONLY FALSE POSITIVE GUARD
+    -- ============================================================
+    -- Các tín hiệu ngữ cảnh không đủ để kết luận IP tấn công.
+    -- Không tích lũy reputation hoặc blacklist nếu không có
+    -- bằng chứng tấn công độc lập.
+
+    local reputation_worthy =
+        independent_abuse
+        or ctx.security.bad_bot_headless
+        or ctx.security.jwt_replay
+        or ctx.security.jwt_alg_attack
+        or ctx.security.xff_malformed
+        or ctx.security.xff_private_chain
+
+    if not reputation_worthy then
+        -- Giữ điểm quan sát phục vụ audit.
+        ctx.security.risk_final = base_risk
+
+        -- Không ghi Redis reputation cho request chỉ có
+        -- tín hiệu ngữ cảnh.
+        -- Giữ nguyên quyết định block của module trước nếu có.
+        if not ctx.security.risk_action then
+            ctx.security.risk_action =
+                ctx.security.block and "block" or "pass"
+        end
+
+        ngx.var.log_risk_score =
+            string.format("%.1f", base_risk)
+
+        ngx.var.log_security_block =
+            ctx.security.risk_action
+
+        ngx.log(
+            ngx.INFO,
+            "[RISK] Context-only request; skip reputation update ip=",
+            ip,
+            " signals=[",
+            table.concat(signals, ","),
+            "]"
+        )
+
+        return
+    end
+
     -- ── REDIS REPUTATION ──────────────────────────────────────
     -- Kết nối an toàn qua Helper (Tự động Select DB 0)
     local red, err = redis_helper.get_redis(0)
@@ -245,7 +316,7 @@ function _M.run(ctx)
     -- ACTION CORE: Phán quyết cuối cùng của Risk Engine.
     if final_risk >= cfg.block_threshold then
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
-        if metric_blocked then metric_blocked:inc(1, {"risk_block"}) end
+        if metric_blocked then metric_blocked:inc(1, {"risk_block", ip}) end
         
         ctx.security.risk_action = "block"
         
@@ -264,7 +335,7 @@ function _M.run(ctx)
 
     elseif final_risk >= cfg.limit_threshold then
         ngx.log(ngx.WARN, "[RISK] LIMIT ip=", ip, " final=", string.format("%.1f", final_risk))
-        if metric_blocked then metric_blocked:inc(1, {"risk_limit"}) end
+        if metric_blocked then metric_blocked:inc(1, {"risk_limit", ip}) end
         ctx.security.risk_action = "limit"
     end
 

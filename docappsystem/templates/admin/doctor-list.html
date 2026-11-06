@@ -54,29 +54,78 @@
     <th>Số điện thoại</th>
     <th>Email</th>
     <th>Ngày tạo tài khoản</th>
+    <th>Trạng thái tài khoản</th>
     <th class="text-right">Hành động</th>
     </tr>
     </thead>
     <tbody>
         {% for i in doctorlist %}
-    <tr>
-    <td>{{i.id}}</td>
-    <td>{{i.admin.first_name}} {{i.admin.last_name}}</td>
-    <td>{{i.mobilenumber}}</td>
-    <td>{{i.admin.email}}</td>
-    <td>{{i.regdate_at}}</td>
-    <td class="text-right">
-    <div class="actions">
-    <a href="{% url 'viewdoctordetails' i.id %}" class="btn btn-sm bg-success-light mr-2">
-   Xem
-    </a>
-    <a href="{% url 'viewdoctorappointmentlist' i.id %}" class="btn btn-sm bg-danger-light">
-   Danh sách lịch hẹn
-    </a>
-    </div>
-    </td>
-    </tr> {% endfor %}
-   
+        <tr>
+            <td>{{ i.id }}</td>
+            <td>{{ i.admin.first_name }} {{ i.admin.last_name }}</td>
+            <td>{{ i.mobilenumber }}</td>
+            <td>{{ i.admin.email }}</td>
+            <td>{{ i.regdate_at }}</td>
+
+            <!-- Trạng thái tài khoản -->
+            <td>
+                {% if i.admin %}
+                    {% if i.admin.is_active %}
+                        <span class="badge badge-success">
+                            Đã kích hoạt
+                        </span>
+                    {% else %}
+                        <span class="badge badge-warning">
+                            Chờ duyệt
+                        </span>
+                    {% endif %}
+                {% else %}
+                    <span class="badge badge-secondary">
+                        Không có tài khoản
+                    </span>
+                {% endif %}
+            </td>
+
+            <!-- Các hành động quản trị -->
+            <td class="text-right">
+                <div class="actions">
+
+                    {% if i.admin %}
+                        {% if not i.admin.is_active %}
+                            <form method="POST"
+                                action="{% url 'approve_doctor' i.id %}"
+                                style="display:inline;">
+                                {% csrf_token %}
+
+                                <button type="submit"
+                                        class="btn btn-sm btn-primary"
+                                        onclick="return confirm('Xác nhận kích hoạt tài khoản bác sĩ này?');">
+                                    Kích hoạt
+                                </button>
+                            </form>
+                        {% endif %}
+                    {% endif %}
+
+                    <a href="{% url 'viewdoctordetails' i.id %}"
+                    class="btn btn-sm bg-success-light mr-2">
+                        Xem
+                    </a>
+
+                    <a href="{% url 'viewdoctorappointmentlist' i.id %}"
+                    class="btn btn-sm bg-danger-light">
+                        Danh sách lịch hẹn
+                    </a>
+
+                </div>
+            </td>
+        </tr>
+        {% empty %}
+        <tr>
+            <td colspan="7" class="text-center">
+                Chưa có bác sĩ nào.
+            </td>
+        </tr>
+        {% endfor %}
     </tbody>
     </table>
     </div>

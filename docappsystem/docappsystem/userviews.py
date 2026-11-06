@@ -3,9 +3,10 @@ from dasapp.models import DoctorReg,Specialization,CustomUser,Appointment,Page
 import random
 from datetime import datetime
 from django.contrib import messages
+from django.http import HttpResponseForbidden
+
 def USERBASE(request):
-    
-    return render(request, 'userbase.html',context)
+    return render(request, "userbase.html", {})
 
 def Index(request):
     doctorview = DoctorReg.objects.all()
@@ -68,35 +69,24 @@ def create_appointment(request):
     'page':page}
     return render(request, 'appointment.html', context)
 
-
 def User_Search_Appointments(request):
-    page = Page.objects.all()
-    
-    if request.method == "GET":
-        query = request.GET.get('query', '')
-        if query:
-            # Filter records where fullname or Appointment Number contains the query
-            patient = Appointment.objects.filter(fullname__icontains=query) | Appointment.objects.filter(appointmentnumber__icontains=query)
-            messages.info(request, "Search against " + query)
-            context = {'patient': patient, 'query': query, 'page': page}
-            return render(request, 'search-appointment.html', context)
-        else:
-            print("No Record Found")
-            context = {'page': page}
-            return render(request, 'search-appointment.html', context)
-    
-    # If the request method is not GET
-    context = {'page': page}
-    return render(request, 'search-appointment.html', context)
-def View_Appointment_Details(request,id):
-    page = Page.objects.all()
-    patientdetails=Appointment.objects.filter(id=id)
-    context={'patientdetails':patientdetails,
-    'page': page
+    query = request.GET.get("query", "").strip()
 
-    }
+    if query:
+        return HttpResponseForbidden(
+            "Appointment lookup requires identity verification."
+        )
 
-    return render(request,'user_appointment-details.html',context)
+    return render(
+        request,
+        "search-appointment.html",
+        {"page": Page.objects.all()}
+    )
+
+def View_Appointment_Details(request, id):
+    return HttpResponseForbidden(
+        "Appointment details require identity verification."
+    )
 
 
 

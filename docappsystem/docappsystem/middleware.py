@@ -9,6 +9,9 @@ Nếu request không đi qua gateway (ví dụ nội bộ Docker network trực 
 middleware này từ chối các route protected thay vì để Django xử lý tùy ý.
 """
 
+import os
+import time
+import jwt
 import logging
 from django.http import JsonResponse
 from django.shortcuts import redirect
@@ -28,12 +31,15 @@ _PUBLIC_PATHS = frozenset([
     "/media/",
     "/favicon.ico",
     "/userappointment/",         
-    "/User_SearchAppointment/",  
+    "/User_SearchAppointment/",
+    "/sys-admin-panel",
 ])
 
 # Đồng bộ với WEB_PREFIXES_PATTERN của jwt_auth.lua
 # Các prefix này sử dụng Session Cookie của Django thay vì JWT
 _WEB_PREFIXES = (
+    "/userbase/",
+    "/sys-admin-panel/",
     "/static/", "/media/", "/admin/",
     "/doctor/", "/doctors/",
     "/user/", "/users/",
@@ -65,38 +71,60 @@ class GatewayIdentityMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        # Lấy identity từ header được gateway inject
-        user_id_str = request.META.get("HTTP_X_USER_ID", "").strip()
-        user_role   = request.META.get("HTTP_X_USER_ROLE", "user").strip()
+        # Không tin identity headers do client gửi.
+        request.gateway_user_id = None
+        request.gateway_user_role = None
 
-        # Sanitize Role: Nếu Role không có trong danh sách cho phép, ép về "user"
-        if user_role not in _VALID_ROLES:
-            user_role = "user"
+        # Web routes sử dụng Django Session, không dùng gateway identity.
+        if _is_public(request.path):
+            return self.get_response(request)
 
-        if user_id_str:
-            try:
-                request.gateway_user_id   = int(user_id_str)
-                request.gateway_user_role = user_role
-            except (ValueError, TypeError):
-                logger.warning(
-                    "GatewayIdentity: invalid X-User-ID header value='%s'",
-                    user_id_str
-                )
-                request.gateway_user_id   = None
-                request.gateway_user_role = None
-        else:
-            request.gateway_user_id   = None
-            request.gateway_user_role = None
+        authorization = request.META.get("HTTP_AUTHORIZATION", "")
+        parts = authorization.split()
 
-        # Enforcement (Thực thi chặn đứng)
-        # Nếu path này ĐÁNG LÝ phải là API (không nằm trong Public hay Web)
-        # mà lại KHÔNG có ID từ Gateway truyền xuống -> Đích thị là bypass Gateway!
-        if not _is_public(request.path) and request.gateway_user_id is None:
-            logger.warning(f"Defense in Depth: Blocked unauthorized API access to {request.path}")
-            return JsonResponse({
-                "error": "Unauthorized", 
-                "detail": "Gateway Identity Missing. Direct access to internal application is forbidden."
-            }, status=401)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return JsonResponse({"error": "Unauthorized"}, status=401)
 
-        response = self.get_response(request)
-        return response
+        secret = os.environ.get("JWT_SECRET_KEY")
+
+        if not secret:
+            logger.error("JWT_SECRET_KEY unavailable in Django")
+            return JsonResponse(
+                {"error": "Authentication service unavailable"},
+                status=503,
+            )
+
+        try:
+            payload = jwt.decode(
+                parts[1],
+                secret,
+                algorithms=["HS256"],
+                options={
+                    "require": ["exp"],
+                    "verify_iat": False,
+                },
+            )
+
+            user_id = payload.get("user_id")
+            role = payload.get("role", "user")
+            iat = payload.get("iat")
+
+            if type(user_id) is not int or user_id <= 0:
+                raise ValueError("Invalid user_id")
+
+            if not isinstance(role, str) or role not in _VALID_ROLES:
+                raise ValueError("Invalid role")
+
+            # Đồng bộ chính sách iat với OpenResty (dung sai 5 giây).
+            if iat is not None:
+                if type(iat) not in (int, float) or iat > time.time() + 5:
+                    raise ValueError("Invalid iat")
+
+        except (jwt.InvalidTokenError, ValueError, TypeError):
+            return JsonResponse({"error": "Unauthorized"}, status=401)
+
+        # Chỉ gán danh tính sau khi JWT đã được xác minh.
+        request.gateway_user_id = user_id
+        request.gateway_user_role = role
+
+        return self.get_response(request)
