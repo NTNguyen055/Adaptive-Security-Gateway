@@ -62,7 +62,7 @@ function _M.run(ctx)
                             ngx.log(ngx.NOTICE, "[TELEGRAM SUPPRESSED] ip_blacklist_cache alert suppressed for ip=", ip)
 
                             if metric_blocked then
-                                metric_blocked:inc(1, {"ip_blacklist_cache"})
+                                metric_blocked:inc(1, {"ip_blacklist_cache", ip})
                             end
                             return
                         end
@@ -90,7 +90,7 @@ function _M.run(ctx)
 
                         table.insert(ctx.security.signals, "ip_blacklist_cache")
                         if metric_blocked then
-                            metric_blocked:inc(1, {"ip_blacklist_cache"})
+                            metric_blocked:inc(1, {"ip_blacklist_cache", ip})
                         end
                         return
                     end
@@ -103,7 +103,7 @@ function _M.run(ctx)
 
                     table.insert(ctx.security.signals, "ip_blacklist_cache")
                     if metric_blocked then
-                        metric_blocked:inc(1, {"ip_blacklist_cache"})
+                        metric_blocked:inc(1, {"ip_blacklist_cache", ip})
                     end
                     return
                 end
