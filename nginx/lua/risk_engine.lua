@@ -141,6 +141,52 @@ function _M.run(ctx)
     end
 
     -- ============================================================
+    -- RATE-ONLY MITIGATION GUARD
+    -- ============================================================
+    -- Vượt rate limit không tự động trở thành hình phạt IP dài hạn.
+    -- Chặn request hiện tại nhưng không cập nhật Redis reputation.
+
+    local has_rate_violation =
+        ctx.security.rate_limit_hard
+        or ctx.security.rate_limit_burst
+        or ctx.security.redis_rate_exceeded
+
+    local has_attack_evidence =
+        ctx.security.waf_sqli
+        or ctx.security.waf_xss
+        or ctx.security.bad_bot_scanner
+        or ctx.security.bad_bot_headless
+        or ctx.security.brute_force_attack
+        or ctx.security.xff_spoof
+        or ctx.security.xff_chain_abuse
+        or ctx.security.xff_malformed
+        or ctx.security.xff_private_chain
+        or ctx.security.jwt_replay
+        or ctx.security.jwt_alg_attack
+
+    if has_rate_violation and not has_attack_evidence then
+        ctx.security.block = true
+
+        -- Đánh dấu request chỉ bị giới hạn tốc độ.
+        ctx.security.rate_only_limited = true
+        ctx.security.risk_action = "limit"
+        ctx.security.risk_final = base_risk
+
+        ngx.var.log_risk_score =
+            string.format("%.1f", base_risk)
+
+        ngx.var.log_security_block = "limit"
+
+        ngx.log(
+            ngx.INFO,
+            "[RISK] Rate-only mitigation; no reputation update ip=",
+            ip
+        )
+
+        return
+    end
+
+    -- ============================================================
     -- CONTEXT-ONLY FALSE POSITIVE GUARD
     -- ============================================================
     -- Các tín hiệu ngữ cảnh không đủ để kết luận IP tấn công.
