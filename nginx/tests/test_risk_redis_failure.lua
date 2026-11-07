@@ -26,6 +26,21 @@ function red:set(key,val,...)
 end
 function red:sadd() error("Risk Engine must not write to persistent manual SET") end
 function red:close() state.closed=state.closed+1 end
+
+-- Simulate atomic EVAL: a failed write cannot partially update keys.
+function red:eval(script,nkeys,score_key,stamp_key,ban_key, bf_key,score,ttl,stamp,has_stamp,has_ban,ban_ttl)
+  assert(type(script)=="string" and nkeys==4)
+  if state.fail_write_key==score_key or
+      (tonumber(has_stamp)==1 and state.fail_write_key==stamp_key) or
+      (tonumber(has_ban)==1 and state.fail_write_key==ban_key) then
+    return nil,"write timeout"
+  end
+  self:set(score_key,score,"EX",ttl)
+  if tonumber(has_stamp)==1 then self:set(stamp_key,stamp,"EX",ttl) end
+  if tonumber(has_ban)==1 then self:set(ban_key,"1","EX",ban_ttl) end
+  return 1
+end
+
 package.loaded["redis_helper"]={
   get_redis=function(db)
     assert(db==0)
@@ -116,13 +131,14 @@ case("reputation write failure does not create a detached blacklist",function()
   check(state.kv["blacklist:"..ip]==nil and state.kv["risk:v1:last_seen:"..ip]==nil,
         "detached write after failed reputation update")
 end)
-case("temporary-ban write failure is reported without granting request",function()
+case("atomic temporary-ban failure leaves no partial reputation and preserves request block",function()
   state.fail_write_key="blacklist:"..ip
   local ctx=abuse(75,true)
   module.run(ctx)
   check(ctx.security.block and ctx.security.risk_action=="block","failed ban write allowed request")
   check(ctx.security.redis_risk_error,"ban write failure hidden")
-  check(state.kv["risk:v1:"..ip]~=nil,"reputation result missing")
+  check(state.kv["risk:v1:"..ip]==nil and state.kv["risk:v1:last_seen:"..ip]==nil,
+        "failed atomic transaction left partial reputation/timestamp")
 end)
 case("context-only request never opens Redis even when unavailable",function()
   state.unavailable=true

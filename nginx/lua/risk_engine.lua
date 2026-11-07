@@ -11,7 +11,7 @@ local telegram_alert = require "telegram_alert"
 -- ============================================================
 local function get_config()
     return {
-        -- Ngưỡng hành động của Risk Engine: 
+        -- Ngưỡng hành động của Risk Engine:
         -- Đạt 50 điểm sẽ bị Limit (giới hạn / Captcha), đạt 80 điểm sẽ bị Block (chặn hoàn toàn).
         block_threshold = tonumber(os.getenv("RISK_BLOCK_THRESHOLD")) or 80,
         limit_threshold = tonumber(os.getenv("RISK_LIMIT_THRESHOLD")) or 50,
@@ -32,6 +32,52 @@ local REPUTATION_TTL_NORMAL = 3600       -- 1 hour
 local REPUTATION_TTL_ELEVATED = 7200     -- 2 hours
 local AUTOMATIC_BLOCK_TTL = 900         -- 15 minutes
 local REPUTATION_DECAY_PERIOD = 300       -- 5 minutes
+
+-- Compare-and-swap: check the exact snapshot read by this request before
+-- committing score, timestamp, and auto-ban in one EVAL.  A conflicting
+-- concurrent request returns 0; the caller MUST reload and recompute.
+-- This prevents silent lost updates while retaining the existing scoring code.
+-- Redis scripts are atomic in execution/visibility, but not rollback-on-error.
+local WRITE_REPUTATION_SCRIPT = [[
+local score_key = KEYS[1]
+local seen_key = KEYS[2]
+local ban_key = KEYS[3]
+local history_key = KEYS[4]
+local score = tonumber(ARGV[1])
+local rep_ttl = tonumber(ARGV[2])
+local seen_at = tonumber(ARGV[3])
+local write_seen = tonumber(ARGV[4])
+local write_ban = tonumber(ARGV[5])
+local ban_ttl = tonumber(ARGV[6])
+local expected_score = ARGV[7]
+local expected_seen = ARGV[8]
+local expected_history = ARGV[9]
+local MISSING = '__ASG_MISSING__'
+if not score or score ~= score or score < 0 or score > 100
+    or not rep_ttl or rep_ttl < 1 or rep_ttl > 7200
+    or not ban_ttl or ban_ttl < 1 or ban_ttl > 900
+    or (write_seen == 1 and not seen_at)
+    or (write_seen ~= 0 and write_seen ~= 1)
+    or (write_ban ~= 0 and write_ban ~= 1)
+    or not expected_score or not expected_seen or not expected_history then
+    return redis.error_reply('invalid reputation script args')
+end
+-- Do not accept stale updates, including stale brute-force history.
+if (redis.call('GET', score_key) or MISSING) ~= expected_score then return 0 end
+if write_seen == 1 and
+    (redis.call('GET', seen_key) or MISSING) ~= expected_seen then return 0 end
+if (redis.call('GET', history_key) or MISSING) ~= expected_history then return 0 end
+redis.call('SET', score_key, ARGV[1], 'EX', rep_ttl)
+if write_seen == 1 then
+    redis.call('SET', seen_key, ARGV[3], 'EX', rep_ttl)
+end
+if write_ban == 1 then
+    redis.call('SET', ban_key, '1', 'EX', ban_ttl)
+end
+return 1
+]]
+local MAX_REPUTATION_RETRIES = 24
+local MISSING_REDIS_VALUE = '__ASG_MISSING__'
 
 local function bounded_decay_factor(value)
     if value ~= value then return 0.1 end -- NaN protection
@@ -75,7 +121,7 @@ end
 -- SIGNAL CORRELATION
 -- ============================================================
 -- Bảng quy đổi tín hiệu (Signals) thành Điểm rủi ro (Risk Points).
--- Mỗi khi các module trước (WAF, Bot, Geo, Brute-force) phát hiện bất thường, 
+-- Mỗi khi các module trước (WAF, Bot, Geo, Brute-force) phát hiện bất thường,
 -- chúng không chặn ngay mà gắn "signal" vào Request. Risk Engine sẽ tổng hợp ở đây.
 local SIGNAL_BONUS = {
 
@@ -142,13 +188,13 @@ function _M.run(ctx)
     end
 
     -- Mở rộng các combo nguy hiểm (Combination Bonus)
-    -- CORE: Tính năng "Combo Amplification" (Khuếch đại theo chuỗi). 
-    -- Nếu Attacker phối hợp nhiều phương thức (Vd: Dùng Bot + Scan SQLi), điểm rủi ro sẽ 
+    -- CORE: Tính năng "Combo Amplification" (Khuếch đại theo chuỗi).
+    -- Nếu Attacker phối hợp nhiều phương thức (Vd: Dùng Bot + Scan SQLi), điểm rủi ro sẽ
     -- được cộng thêm (bonus) cực mạnh để ép IP chạm ngưỡng Block (80) ngay lập tức.
     if signal_set["waf_sqli"] and signal_set["bad_bot_scanner"] then bonus = bonus + 15 end
     if signal_set["rate_limit_hard"] and signal_set["geo_block"] then bonus = bonus + 10 end
     if signal_set["jwt_invalid"] and signal_set["rate_limit_hard"] then bonus = bonus + 10 end
-    
+
     -- Combo mới
     if signal_set["waf_xss"] and signal_set["jwt_missing"] then bonus = bonus + 15 end          -- Tấn công XSS khi chưa đăng nhập
     if signal_set["bad_bot_headless"] and signal_set["waf_sqli"] then bonus = bonus + 20 end    -- Dùng tool tự động để cào Database
@@ -283,156 +329,174 @@ function _M.run(ctx)
         return
     end
 
-    -- Reads must distinguish Redis nil/error from a legitimate ngx.null miss.
+    -- Optimistic read/compare/update loop. Contended writes must not silently
+    -- overwrite a concurrent request. Bound retries to protect gateway latency.
     local key = "risk:v1:" .. ip
-    local reputation_raw, rep_err = red:get(key)
-    if reputation_raw == nil then
-        discard_connection(red)
-        ngx.log(ngx.ERR, "[RISK] Reputation read failed: ", tostring(rep_err))
-        decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
-        return
-    end
-    local reputation
-    if reputation_raw == ngx.null then
-        reputation = 0
-    else
-        reputation = tonumber(reputation_raw)
-    end
-    if not reputation or reputation ~= reputation or reputation < 0 or reputation > MAX_RISK then
-        discard_connection(red)
-        ngx.log(ngx.ERR, "[RISK] Malformed reputation value")
-        decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
-        return
-    end
-
-    -- Time-based decay uses the timestamp of the last confirmed abuse, not
-    -- the number of clean requests. Clean/context-only requests never write
-    -- reputation, so ordinary NAT/CGNAT users cannot refresh punishment.
-    local timestamp_key = "risk:v1:last_seen:" .. ip
-    local now = nil
-    if cfg.decay_enabled then
-        now = current_time()
-        if reputation > 0 then
-            local last_seen_raw, last_seen_err = red:get(timestamp_key)
-            if last_seen_raw == nil then
-                discard_connection(red)
-                ngx.log(ngx.ERR, "[RISK] Timestamp read failed: ", tostring(last_seen_err))
-                decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
-                return
-            end
-            local last_seen = (last_seen_raw ~= ngx.null)
-                and tonumber(last_seen_raw) or nil
-            if last_seen and now > last_seen then
-                local periods = math.floor((now - last_seen) / REPUTATION_DECAY_PERIOD)
-                if periods > 0 then
-                    local factor = bounded_decay_factor(cfg.decay_factor)
-                    reputation = reputation * math.pow(1 - factor, periods)
-                    if reputation < 1 then reputation = 0 end
-                    ngx.log(ngx.INFO, "[RISK] Time decay ip=", ip,
-                        " periods=", periods,
-                        " reputation=", string.format("%.2f", reputation))
-                end
-            end
-            -- Legacy scores without timestamps are retained until expiry or
-            -- the next confirmed abuse establishes their timestamp.
+    local final_risk, reputation, now
+    local committed_update = false
+    for attempt = 1, MAX_REPUTATION_RETRIES do
+        -- Reads must distinguish Redis nil/error from a legitimate ngx.null miss.
+        local reputation_raw, rep_err = red:get(key)
+        if reputation_raw == nil then
+            discard_connection(red)
+            ngx.log(ngx.ERR, "[RISK] Reputation read failed: ", tostring(rep_err))
+            decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
+            return
         end
-    end
-
-    local final_risk = math_min(reputation + base_risk, MAX_RISK)
-    
-    -- If reputation is already above block threshold, keep that score for the current request.
-    if reputation >= cfg.block_threshold then
-        final_risk = reputation
-        ngx.log(ngx.WARN, "[RISK] High reputation score detected for IP ", ip, " - reputation=", reputation)
-    end
-
-    -- =========================================================================
-    -- BRUTE-FORCE REPUTATION TRACKING
-    -- Kiểm tra lịch sử brute-force để accumulate risk across windows
-    -- =========================================================================
-    local bf_history_key = "brute_force:history:" .. ip
-    local bf_history, bf_err = red:get(bf_history_key)
-    if bf_history == nil then
-        discard_connection(red)
-        ngx.log(ngx.ERR, "[RISK] Brute-force history read failed: ", tostring(bf_err))
-        decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
-        return
-    end
-    
-    -- Liên kết dữ liệu chéo module: Đọc lịch sử từ module Brute-force.
-    -- Nếu IP này có "tiền án" (high_risk_count > 0) thì đè thêm điểm phạt nặng hơn vào Risk tổng.
-    if bf_history and bf_history ~= ngx.null then
-        -- Parse history và count high-risk attempts
-        local high_risk_count = 0
-        for entry in bf_history:gmatch("[^,]+") do
-            local _, attempt = entry:match("^([^:]+):(%d+)$")
-            if attempt and tonumber(attempt) >= 5 then
-                high_risk_count = high_risk_count + 1
-            end
-        end
-        
-        -- Nếu có lịch sử brute-force >= 5 lần, tăng penalty thêm
-        if high_risk_count > 0 then
-            local persistent_penalty = high_risk_count * 15
-            final_risk = math_min(final_risk + persistent_penalty, MAX_RISK)
-            ngx.log(ngx.WARN, "[RISK] Brute-force history detected for IP ", ip,
-                    " - high_risk_count=", high_risk_count, 
-                    " - additional_penalty=", persistent_penalty)
-        end
-    end
-
-    -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
-    -- Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
-    -- Nếu reputation đã đạt ngưỡng block, không cộng thêm momentum
-    if base_risk > 50 and reputation < cfg.block_threshold then
-        final_risk = math_min(final_risk + 10, MAX_RISK)
-    end
-
-    -- =========================================================================
-    -- TỐI ƯU HÓA REDIS WRITE I/O
-    -- Chỉ thực hiện ghi xuống Redis nếu:
-    -- 1. IP này vừa gây ra rủi ro (final_risk > 0.01)
-    -- 2. Hoặc confirmed abuse references a still-active reputation value.
-    -- Clean or context-only traffic returns before this Redis write path.
-    -- =========================================================================
-    if final_risk >= 0.01 or reputation >= 0.01 then
-        
-        -- Bounded reputation lifetime: 1 hour normal / 2 hours elevated.
-        -- Both request decisions and IP reputation remain separate from a manual ban.
-        local rep_ttl = REPUTATION_TTL_NORMAL
-        if final_risk >= cfg.limit_threshold then
-            rep_ttl = REPUTATION_TTL_ELEVATED
-        end
-        local rep_ok, write_err = red:set(key, string.format("%.2f", final_risk), "EX", rep_ttl)
-        if rep_ok ~= "OK" then
-            ctx.security.redis_risk_error = true
-            ngx.log(ngx.ERR, "[RISK] Reputation write failed: ", tostring(write_err))
+        reputation = nil
+        if reputation_raw == ngx.null then
+            reputation = 0
         else
-            -- Timestamp and temporary block only follow a successful score write.
-            if cfg.decay_enabled then
-                local stamp_ok, stamp_err = red:set(timestamp_key, tostring(now), "EX", rep_ttl)
-                if stamp_ok ~= "OK" then
-                    ctx.security.redis_risk_error = true
-                    ngx.log(ngx.ERR, "[RISK] Timestamp write failed: ", tostring(stamp_err))
+            reputation = tonumber(reputation_raw)
+        end
+        if not reputation or reputation ~= reputation or reputation < 0 or reputation > MAX_RISK then
+            discard_connection(red)
+            ngx.log(ngx.ERR, "[RISK] Malformed reputation value")
+            decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
+            return
+        end
+
+        -- Time-based decay uses the timestamp of the last confirmed abuse, not
+        -- the number of clean requests. Clean/context-only requests never write
+        -- reputation, so ordinary NAT/CGNAT users cannot refresh punishment.
+        local timestamp_key = "risk:v1:last_seen:" .. ip
+        now = nil
+        local last_seen_raw = ngx.null
+        if cfg.decay_enabled then
+            now = current_time()
+            if reputation > 0 then
+                local last_seen_err
+                last_seen_raw, last_seen_err = red:get(timestamp_key)
+                if last_seen_raw == nil then
+                    discard_connection(red)
+                    ngx.log(ngx.ERR, "[RISK] Timestamp read failed: ", tostring(last_seen_err))
+                    decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
+                    return
+                end
+                local last_seen = (last_seen_raw ~= ngx.null)
+                    and tonumber(last_seen_raw) or nil
+                if last_seen and now > last_seen then
+                    local periods = math.floor((now - last_seen) / REPUTATION_DECAY_PERIOD)
+                    if periods > 0 then
+                        local factor = bounded_decay_factor(cfg.decay_factor)
+                        reputation = reputation * math.pow(1 - factor, periods)
+                        if reputation < 1 then reputation = 0 end
+                        ngx.log(ngx.INFO, "[RISK] Time decay ip=", ip,
+                            " periods=", periods,
+                            " reputation=", string.format("%.2f", reputation))
+                    end
+                end
+                -- Legacy scores without timestamps are retained until expiry or
+                -- the next confirmed abuse establishes their timestamp.
+            end
+        end
+
+        final_risk = math_min(reputation + base_risk, MAX_RISK)
+
+        -- If reputation is already above block threshold, keep that score for the current request.
+        if reputation >= cfg.block_threshold then
+            final_risk = reputation
+            ngx.log(ngx.WARN, "[RISK] High reputation score detected for IP ", ip, " - reputation=", reputation)
+        end
+
+        -- =========================================================================
+        -- BRUTE-FORCE REPUTATION TRACKING
+        -- Kiểm tra lịch sử brute-force để accumulate risk across windows
+        -- =========================================================================
+        local bf_history_key = "brute_force:history:" .. ip
+        local bf_history, bf_err = red:get(bf_history_key)
+        if bf_history == nil then
+            discard_connection(red)
+            ngx.log(ngx.ERR, "[RISK] Brute-force history read failed: ", tostring(bf_err))
+            decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
+            return
+        end
+
+        -- Liên kết dữ liệu chéo module: Đọc lịch sử từ module Brute-force.
+        -- Nếu IP này có "tiền án" (high_risk_count > 0) thì đè thêm điểm phạt nặng hơn vào Risk tổng.
+        if bf_history and bf_history ~= ngx.null then
+            -- Parse history và count high-risk attempts
+            local high_risk_count = 0
+            for entry in bf_history:gmatch("[^,]+") do
+                local _, attempt = entry:match("^([^:]+):(%d+)$")
+                if attempt and tonumber(attempt) >= 5 then
+                    high_risk_count = high_risk_count + 1
                 end
             end
-            -- Automatic bans never insert into the persistent manual-ban SET.
-            if final_risk >= cfg.block_threshold then
-                local bl_key = "blacklist:" .. ip
-                local ban_ok, ban_err = red:set(bl_key, "1", "EX", AUTOMATIC_BLOCK_TTL)
-                if ban_ok ~= "OK" then
-                    ctx.security.redis_risk_error = true
-                    ngx.log(ngx.ERR, "[RISK] Temporary block write failed: ", tostring(ban_err))
-                else
+
+            -- Nếu có lịch sử brute-force >= 5 lần, tăng penalty thêm
+            if high_risk_count > 0 then
+                local persistent_penalty = high_risk_count * 15
+                final_risk = math_min(final_risk + persistent_penalty, MAX_RISK)
+                ngx.log(ngx.WARN, "[RISK] Brute-force history detected for IP ", ip,
+                        " - high_risk_count=", high_risk_count,
+                        " - additional_penalty=", persistent_penalty)
+            end
+        end
+
+        -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
+        -- Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
+        -- Nếu reputation đã đạt ngưỡng block, không cộng thêm momentum
+        if base_risk > 50 and reputation < cfg.block_threshold then
+            final_risk = math_min(final_risk + 10, MAX_RISK)
+        end
+
+        -- =========================================================================
+        -- TỐI ƯU HÓA REDIS WRITE I/O
+        -- Chỉ thực hiện ghi xuống Redis nếu:
+        -- 1. IP này vừa gây ra rủi ro (final_risk > 0.01)
+        -- 2. Hoặc confirmed abuse references a still-active reputation value.
+        -- Clean or context-only traffic returns before this Redis write path.
+        -- =========================================================================
+        if final_risk >= 0.01 or reputation >= 0.01 then
+
+            -- Bounded reputation lifetime: 1 hour normal / 2 hours elevated.
+            -- Both request decisions and IP reputation remain separate from a manual ban.
+            local rep_ttl = REPUTATION_TTL_NORMAL
+            if final_risk >= cfg.limit_threshold then
+                rep_ttl = REPUTATION_TTL_ELEVATED
+            end
+            local ban_now = final_risk >= cfg.block_threshold
+            local committed, write_err = red:eval(
+                WRITE_REPUTATION_SCRIPT, 4,
+                key, timestamp_key, "blacklist:" .. ip, bf_history_key,
+                string.format("%.2f", final_risk), rep_ttl,
+                tostring(now or 0), cfg.decay_enabled and 1 or 0,
+                ban_now and 1 or 0, AUTOMATIC_BLOCK_TTL,
+                reputation_raw == ngx.null and MISSING_REDIS_VALUE or reputation_raw,
+                last_seen_raw == ngx.null and MISSING_REDIS_VALUE or last_seen_raw,
+                bf_history == ngx.null and MISSING_REDIS_VALUE or bf_history
+            )
+            if committed == 1 then
+                committed_update = true
+                if ban_now then
                     ngx.log(ngx.WARN, "[RISK] Temporary auto-block ip=", ip,
                         " final_risk=", string.format("%.1f", final_risk),
                         " ttl=", AUTOMATIC_BLOCK_TTL, "s")
                 end
+            elseif committed == 0 then
+                -- Another request changed this snapshot. Re-read and recompute.
+                ngx.log(ngx.INFO, "[RISK] Reputation CAS contention ip=", ip,
+                    " attempt=", attempt)
+            else
+                discard_connection(red)
+                ngx.log(ngx.ERR, "[RISK] Atomic reputation EVAL failed: ", tostring(write_err))
+                decide_without_reputation(ctx, base_risk, cfg, "redis_risk_error")
+                return
             end
+        else
+            -- No state change required.
+            committed_update = true
         end
+
+        if committed_update then break end
     end
-    
-    -- Luôn nhớ đóng kết nối Redis để trả về Pool, tránh tràn RAM
+    if not committed_update then
+        ngx.log(ngx.ERR, "[RISK] CAS retries exhausted ip=", ip)
+        redis_helper.close(red)
+        decide_without_reputation(ctx, base_risk, cfg, "redis_risk_contention")
+        return
+    end
     redis_helper.close(red)
 
     -- Log chi tiết (Forensics) - Nên bọc lại để không log rác với traffic sạch
@@ -452,13 +516,13 @@ function _M.run(ctx)
     if final_risk >= cfg.block_threshold then
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
         if metric_blocked then metric_blocked:inc(1, {"risk_block", ip}) end
-        
+
         ctx.security.risk_action = "block"
-        
+
         -- Định nghĩa biến local ở đây để tránh lỗi nil
         local attack_types_str = table.concat(signals, ", ")
         if attack_types_str == "" then attack_types_str = "unknown" end
-        
+
         -- Trực tiếp bắn Alert qua Telegram ngay khi một IP đạt ngưỡng Block.
         telegram_alert.send({
             ip = ip,
@@ -476,12 +540,12 @@ function _M.run(ctx)
 
     ctx.security.risk_final = final_risk
 
-    -- Đẩy kết quả từ Lua ra biến Nginx để file access.log ghi nhận được 
+    -- Đẩy kết quả từ Lua ra biến Nginx để file access.log ghi nhận được
     -- mà không làm lộ dữ liệu qua HTTP Response Header
     -- Rất quan trọng để tích hợp với các hệ thống phân tích Log tập trung (ELK, Datadog...)
     ngx.var.log_risk_score = string.format("%.1f", final_risk)
     ngx.var.log_security_block = ctx.security.risk_action or "pass"
-    
+
 end
 
 return _M

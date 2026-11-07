@@ -7,7 +7,10 @@ local _M = {}
 local redis_helper = require "redis_helper"
 
 local CACHE_TTL_POSITIVE = 60
-local CACHE_TTL_NEGATIVE = 30
+-- Bound the delay before a newly issued manual ban becomes visible.
+-- Reduced from 30s to 5s; immediate enforcement needs explicit cache
+-- invalidation through a privileged ban-management workflow (Stage 1.5 follow-up).
+local CACHE_TTL_NEGATIVE = 5
 
 local function block_request(ctx, ip, reason)
     ctx.security.ip_blacklisted = true
@@ -43,7 +46,7 @@ function _M.run(ctx)
     local cache_key = "bl:" .. ip
     local cached = cache and cache:get(cache_key) or nil
 
-    -- Negative hits are a bounded 30-second trade-off: a newly added manual
+    -- Negative hits are a bounded 5-second trade-off: a newly added manual
     -- ban might not take effect until the negative cache expires.
     if cached == 0 then return end
 
