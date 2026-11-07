@@ -164,7 +164,8 @@ run_case("strong WAF SQLi evidence still updates reputation and blocks", functio
     risk_engine.run(ctx)
     check(ctx.security.risk_action == "block", "SQLi should be blocked")
     check(kv["risk:v1:" .. ip] ~= nil, "SQLi evidence did not update reputation")
-    check(sets.blacklist_ips and sets.blacklist_ips[ip], "SQLi evidence did not trigger blacklist")
+    check(kv["blacklist:" .. ip] == "1", "SQLi evidence did not create temporary blacklist key")
+    check(not (sets.blacklist_ips and sets.blacklist_ips[ip]), "auto-block must not enter permanent manual set")
 end)
 
 print(string.format("Risk Engine mock tests: %d passed, %d failed, %d total", passed, failed, passed + failed))
