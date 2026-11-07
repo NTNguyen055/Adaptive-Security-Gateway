@@ -130,6 +130,13 @@ services:
     image: prom/prometheus:v3.4.2
     profiles: [monitoring]
     restart: unless-stopped
+    # Stage 1.6 local monitoring: bound historical TSDB growth.
+    # Size bound concerns blocks; WAL/head may temporarily exceed it.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=512MB
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_local_data:/prometheus
@@ -151,6 +158,9 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - grafana_local_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     networks:
