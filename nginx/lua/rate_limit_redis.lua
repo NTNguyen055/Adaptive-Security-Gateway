@@ -2,7 +2,6 @@ local _M = {}
 
 local ngx        = ngx
 local tonumber   = tonumber
-local math_min   = math.min
 local math_floor = math.floor
 local redis_helper = require "redis_helper" -- Gọi module dùng chung (Tránh lỗi DB 0)
 
@@ -26,19 +25,30 @@ end
 -- Thuật toán này dùng Sorted Set (ZSET) với điểm score chính là thời gian (timestamp ms).
 -- Mọi request cũ hơn (now - window) sẽ bị vứt bỏ, giúp đếm rate limit trượt theo thời gian thực cực kỳ mượt mà.
 local SLIDING_SCRIPT = [[
-local key    = KEYS[1]
-local now_ms = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local clear_before = now_ms - (window * 1000)
+local key        = KEYS[1]
+local seq_key    = KEYS[2]
+local now_ms     = tonumber(ARGV[1])
+local window_ms  = tonumber(ARGV[2]) * 1000
 
--- Xóa các request đã quá hạn (ngoài cửa sổ) khỏi ZSET
-redis.call('ZREMRANGEBYSCORE', key, 0, clear_before)
--- Thêm thời điểm request hiện tại vào ZSET
-redis.call('ZADD', key, now_ms, now_ms)
--- Đặt TTL để Redis tự dọn rác nếu không còn ai truy cập
-redis.call('EXPIRE', key, window)
+-- Loại bỏ request nằm ngoài sliding window.
+redis.call(
+    'ZREMRANGEBYSCORE',
+    key,
+    '-inf',
+    now_ms - window_ms
+)
 
--- Trả về tổng số request hợp lệ đang có trong ZSET
+-- INCR chạy nguyên tử trong Redis.
+-- Đảm bảo các request cùng mili-giây có member riêng.
+local seq = redis.call('INCR', seq_key)
+local member = tostring(now_ms) .. ':' .. tostring(seq)
+
+redis.call('ZADD', key, now_ms, member)
+
+-- Tự động dọn dẹp cả ZSET và sequence key.
+redis.call('PEXPIRE', key, window_ms)
+redis.call('PEXPIRE', seq_key, window_ms)
+
 return redis.call('ZCARD', key)
 ]]
 
@@ -56,36 +66,20 @@ function _M.run(ctx)
 
     local cfg = get_config()
 
-    -- ── LOCAL THROTTLE (L1 Cache) ─────────────────────────────
-    local throttle = ngx.shared.rl_counter
-    
-    -- Không bỏ qua throttle nếu IP đang burst/hard limit
-    local skip_throttle = ctx.security.rate_limit_burst or ctx.security.rate_limit_hard
-
-    -- CORE HIỆU NĂNG: Đây là lớp vi đệm (Micro-cache L1). Nếu một IP "sạch" (Risk < 30) 
-    -- spam quá nhanh, thay vì đập chục lệnh gọi xuống Redis (gây nghẽn mạng nội bộ), Nginx sẽ chặn
-    -- bớt các lời gọi bằng biến nhớ tạm ở RAM trong 200ms. Chỉ 1 request đầu tiên được lọt xuống Redis tính điểm.
-    if throttle and (ctx.security.risk or 0) < 30 and not skip_throttle then
-        local throttle_key = "rrl_throttle:" .. ip
-        local hit = throttle:get(throttle_key)
-        if hit then
-            -- Xóa bỏ signal "redis_rate_ok" để làm sạch log
-            return
-        end
-        -- Giảm TTL xuống 0.2s (200ms) thay vì 1s để không che giấu các đợt Burst
-        throttle:set(throttle_key, 1, 0.2)  
-    end
+    -- Mỗi request đến Redis Rate Limiter phải được ghi nhận.
+    -- Không dùng micro-cache để bỏ qua việc đếm request.
+    -- Local Rate Limiter phía trước vẫn giữ chức năng bảo vệ L1.
 
     -- ── REDIS (L2 Cache) ──────────────────────────────────────
     -- Kết nối an toàn qua Helper (Tự động Select DB 0)
     local red, err = redis_helper.get_redis(0)
 
     if not red then
-        ngx.log(ngx.WARN, "[REDIS_RL] Redis down: ", err)
-        ctx.security.redis_rl_fail = true
+        ngx.log(ngx.WARN, "[REDIS_RL] Redis unavailable: ", err)
 
-        local base = ctx.security.rate_limit_hard and 15 or 5
-        ctx.security.risk = math_min((ctx.security.risk or 0) + base, 100)
+        -- Infrastructure failure is not evidence of client abuse.
+        -- Local Rate Limiting remains active as a fallback.
+        ctx.security.redis_rl_fail = true
         return
     end
 
@@ -97,21 +91,61 @@ function _M.run(ctx)
     -- TỐI ƯU I/O: Sử dụng Pipeline để gom cụm (batching). Thay vì gửi 2 network round-trip 
     -- tới Redis (1 cho IP tổng, 1 cho IP+URI) thì gói gọn lại thành 1 gói duy nhất. Giảm 50% độ trễ (latency).
     red:init_pipeline()
-    red:eval(SLIDING_SCRIPT, 1, key_ip,     now_ms, cfg.window)
-    red:eval(SLIDING_SCRIPT, 1, key_ip_uri, now_ms, cfg.window)
+    red:eval(
+        SLIDING_SCRIPT, 2,
+        key_ip, key_ip .. ":seq",
+        now_ms, cfg.window
+    )
+
+    red:eval(
+        SLIDING_SCRIPT, 2,
+        key_ip_uri, key_ip_uri .. ":seq",
+        now_ms, cfg.window
+    )
+
     local results, pipe_err = red:commit_pipeline()
 
-    redis_helper.close(red)
-
+    -- Lỗi truyền dữ liệu: không tái sử dụng kết nối.
     if not results then
-        ngx.log(ngx.ERR, "[REDIS_RL] Pipeline error: ", pipe_err)
+        red:close()
+
+        ngx.log(
+            ngx.ERR,
+            "[REDIS_RL] Pipeline failed: ",
+            tostring(pipe_err)
+        )
+
         ctx.security.redis_rl_error = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 10, 100)
         return
     end
 
-    local count_ip     = tonumber(results[1]) or 0
-    local count_ip_uri = tonumber(results[2]) or 0
+    redis_helper.close(red)
+
+    -- Redis EVAL trả về integer khi thành công.
+    -- Không được coi phản hồi lỗi là số đếm bằng 0.
+    local function valid_count(value)
+        return type(value) == "number"
+            and value >= 1
+            and value % 1 == 0
+    end
+
+    if #results ~= 2
+        or not valid_count(results[1])
+        or not valid_count(results[2]) then
+
+        ctx.security.redis_rl_error = true
+
+        ngx.log(
+            ngx.ERR,
+            "[REDIS_RL] Invalid pipeline replies ip=",
+            ip
+        )
+
+        return
+    end
+
+    local count_ip = results[1]
+    local count_ip_uri = results[2]
     
     -- Kiểm tra Độc lập. Không dùng math.max sai lầm nữa.
     -- Giới hạn cho 1 URI cụ thể sẽ chặt hơn (chỉ bằng 70% tổng giới hạn IP)
@@ -123,11 +157,11 @@ function _M.run(ctx)
 
     -- ── EXCEEDED (>100%) ──────────────────────────────────────
     if count_ip > limit_global or count_ip_uri > limit_uri then
-        -- ACTION CORE: Kích hoạt chặn khi vượt ngưỡng. Cộng thẳng +80 điểm Risk 
-        -- để ép IP này văng vào vùng Blacklist vĩnh viễn (hoặc Block tạm thời) do Risk Engine đảm nhận.
+    -- Chỉ từ chối request hiện tại khi vượt Redis Rate Limit.
+    -- Không cộng Risk hoặc tự động blacklist IP chỉ vì vượt tốc độ.
+    -- Risk Engine sẽ phân loại request này là rate-only mitigation.
         ctx.security.redis_rate_exceeded = true
-        ctx.security.block               = true   
-        ctx.security.risk                = math_min((ctx.security.risk or 0) + 80, 100)
+        ctx.security.block               = true
 
         table.insert(ctx.security.signals, "redis_rate_exceeded")
         ngx.log(ngx.WARN, "[REDIS_RL] EXCEEDED ip=", ip, " count_ip=", count_ip, "/", limit_global, " count_uri=", count_ip_uri, "/", limit_uri)
@@ -137,18 +171,22 @@ function _M.run(ctx)
     end
 
     -- ── WARNING (70%~100%) ────────────────────────────────────
-    -- Tính năng Cảnh báo sớm: Dù chưa bị Block, nhưng nếu user chạm mốc 70% Rate Limit, 
-    -- bắt đầu "nạp" nhẹ điểm Risk (+10). Nếu đây là Botnet, các module khác (WAF, Bot detection) 
-    -- sẽ dễ dàng bồi thêm điểm để kích block sớm hơn.
-    if count_ip > (limit_global * 0.7) or count_ip_uri > (limit_uri * 0.7) then
-        ctx.security.redis_rate_warn = true
-        ctx.security.risk = math_min((ctx.security.risk or 0) + 10, 100)
-        
-        table.insert(ctx.security.signals, "redis_rate_warn")
-        ngx.log(ngx.WARN, "[REDIS_RL] WARN ip=", ip, " count_ip=", count_ip, "/", limit_global, " count_uri=", count_ip_uri, "/", limit_uri)
+    -- Gần chạm giới hạn chưa phải bằng chứng tấn công.
+    -- Chỉ ghi nhận tín hiệu để quan sát, không tăng Risk Score.
+    if count_ip > (limit_global * 0.7)
+        or count_ip_uri > (limit_uri * 0.7) then
 
-        -- Bổ sung Metric để theo dõi lượng User đang mấp mé mép bờ Block
-        if metric_blocked then metric_blocked:inc(1, {"redis_rate_warn", ip}) end
+        ctx.security.redis_rate_warn = true
+
+        table.insert(ctx.security.signals, "redis_rate_warn")
+
+        ngx.log(
+            ngx.WARN,
+            "[REDIS_RL] WARN ip=", ip,
+            " count_ip=", count_ip, "/", limit_global,
+            " count_uri=", count_ip_uri, "/", limit_uri
+        )
+
         return
     end
 
