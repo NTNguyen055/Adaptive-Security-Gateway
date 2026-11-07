@@ -23,6 +23,16 @@ function red:sadd(key, val)
     state.writes[#state.writes + 1] = "sadd:" .. key
     return 1
 end
+
+-- Simulate the atomic EVAL contract; commit none when it fails.
+function red:eval(script, nkeys, score_key, stamp_key, ban_key, bf_key, score, ttl, stamp, has_stamp, has_ban, ban_ttl)
+    assert(type(script)=="string" and nkeys==4 and score_key:match("^risk:v1:"), "bad EVAL contract")
+    if tonumber(has_stamp)==1 then self:set(stamp_key, stamp, "EX", ttl) end
+    self:set(score_key, score, "EX", ttl)
+    if tonumber(has_ban)==1 then self:set(ban_key, "1", "EX", ban_ttl) end
+    return 1
+end
+
 package.loaded["redis_helper"] = {
     get_redis = function(db)
         assert(db == 0)

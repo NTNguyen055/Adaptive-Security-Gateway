@@ -18,6 +18,7 @@ _G.ngx = {
 }
 
 local kv, sets, writes, alerts
+local conflicts_left, eval_calls
 local red = {}
 
 function red:get(key)
@@ -34,6 +35,23 @@ function red:sadd(key, value)
     sets[key] = sets[key] or {}
     sets[key][value] = true
     writes[#writes + 1] = { method = "sadd", key = key, value = value }
+    return 1
+end
+
+
+-- Simulate the atomic EVAL contract; commit none when it fails.
+function red:eval(script, nkeys, score_key, stamp_key, ban_key, bf_key, score, ttl, stamp, has_stamp, has_ban, ban_ttl, old_score, old_stamp, old_bf)
+    assert(type(script)=="string" and nkeys==4 and score_key:match("^risk:v1:"), "bad EVAL contract")
+    eval_calls = eval_calls + 1
+    if conflicts_left > 0 then
+        conflicts_left = conflicts_left - 1
+        kv[score_key] = "30.00"  -- another confirmed request committed first
+        return 0
+    end
+    assert(old_score == (kv[score_key] or "__ASG_MISSING__"), "stale snapshot was not reloaded")
+    if tonumber(has_stamp)==1 then self:set(stamp_key, stamp, "EX", ttl) end
+    self:set(score_key, score, "EX", ttl)
+    if tonumber(has_ban)==1 then self:set(ban_key, "1", "EX", ban_ttl) end
     return 1
 end
 
@@ -63,6 +81,7 @@ local passed, failed = 0, 0
 
 local function reset()
     kv, sets, writes, alerts = {}, {}, {}, {}
+    conflicts_left, eval_calls = 0, 0
     ngx.var = {
         remote_addr = ip,
         realip_remote_addr = ip,
@@ -166,6 +185,17 @@ run_case("strong WAF SQLi evidence still updates reputation and blocks", functio
     check(kv["risk:v1:" .. ip] ~= nil, "SQLi evidence did not update reputation")
     check(kv["blacklist:" .. ip] == "1", "SQLi evidence did not create temporary blacklist key")
     check(not (sets.blacklist_ips and sets.blacklist_ips[ip]), "auto-block must not enter permanent manual set")
+end)
+
+run_case("CAS conflict reloads reputation before a second write", function()
+    conflicts_left = 1
+    local ctx = { security = { client_ip = ip, risk = 20,
+        bad_bot_scanner = true, signals = {"bad_bot_scanner"} } }
+    risk_engine.run(ctx)
+    check(eval_calls == 2, "expected CAS retry")
+    check(ctx.security.risk_final == 60, "lost concurrent reputation increment")
+    check(kv["risk:v1:" .. ip] == "60.00", "stored reputation lost update")
+    check(not ctx.security.redis_risk_error, "successful retry marked as failure")
 end)
 
 print(string.format("Risk Engine mock tests: %d passed, %d failed, %d total", passed, failed, passed + failed))
