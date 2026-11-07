@@ -166,7 +166,6 @@ function _M.run(ctx)
         table.insert(ctx.security.signals, "redis_rate_exceeded")
         ngx.log(ngx.WARN, "[REDIS_RL] EXCEEDED ip=", ip, " count_ip=", count_ip, "/", limit_global, " count_uri=", count_ip_uri, "/", limit_uri)
 
-        if metric_blocked then metric_blocked:inc(1, {"redis_rate_limit", ip}) end
         return
     end
 

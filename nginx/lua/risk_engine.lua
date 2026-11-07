@@ -515,7 +515,6 @@ function _M.run(ctx)
     -- ACTION CORE: Phán quyết cuối cùng của Risk Engine.
     if final_risk >= cfg.block_threshold then
         ngx.log(ngx.WARN, "[RISK] BLOCK ip=", ip, " final=", string.format("%.1f", final_risk), " signals=[", table.concat(signals, ","), "]")
-        if metric_blocked then metric_blocked:inc(1, {"risk_block", ip}) end
 
         ctx.security.risk_action = "block"
 
@@ -534,7 +533,6 @@ function _M.run(ctx)
 
     elseif final_risk >= cfg.limit_threshold then
         ngx.log(ngx.WARN, "[RISK] LIMIT ip=", ip, " final=", string.format("%.1f", final_risk))
-        if metric_blocked then metric_blocked:inc(1, {"risk_limit", ip}) end
         ctx.security.risk_action = "limit"
     end
 

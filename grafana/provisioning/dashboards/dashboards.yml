@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: Adaptive Security Gateway
+    orgId: 1
+    folder: Adaptive Security Gateway
+    folderUid: asg-security
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    # >10s forces polling; works reliably for Docker Desktop bind mounts.
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

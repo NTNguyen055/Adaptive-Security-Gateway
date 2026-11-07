@@ -366,12 +366,7 @@ function _M.run(ctx)
             )
         end
 
-        if metric_blocked then
-            metric_blocked:inc(
-                1,
-                {"bad_bot_scanner", ip}
-            )
-        end
+
 
         return
     end
@@ -417,12 +412,7 @@ function _M.run(ctx)
             )
         end
 
-        if metric_blocked then
-            metric_blocked:inc(
-                1,
-                {"bad_bot_headless", ip}
-            )
-        end
+
 
         return
     end
