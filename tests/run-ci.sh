@@ -7,7 +7,7 @@ set -Eeuo pipefail
 : "${GW_IMAGE:?Jenkins must supply GW_IMAGE}"
 : "${IMAGE_TAG:?Jenkins must supply IMAGE_TAG}"
 
-command -v docker >/dev/null || { echo 'FAIL: Docker CLI missing' >&2; exit 1; }
+command -v docker >/dev/null || { echo 'FAILED: Docker CLI missing' >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
