@@ -25,6 +25,7 @@ gateway_suite() {
 
   local pairs=(
     'test_ip_blacklist:ip_blacklist'
+    'test_brute_force_login:brute_force_login'
     'test_jwt_auth:jwt_auth'
     'test_metrics_labels:metrics_labels'
     'test_rate_limit:rate_limit'

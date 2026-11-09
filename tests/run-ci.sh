@@ -15,6 +15,7 @@ cd "$ROOT"
 # Mount only code and tests from the currently checked-out commit.
 lua_tests=(
   'test_ip_blacklist:ip_blacklist'
+  'test_brute_force_login:brute_force_login'
   'test_jwt_auth:jwt_auth'
   'test_metrics_labels:metrics_labels'
   'test_rate_limit:rate_limit'
@@ -49,7 +50,7 @@ fi
 DOCKER_TESTS_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/tests"
 DOCKER_LUA_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/lua"
 
-printf '\n=== OpenResty LuaJIT regression (10 suites) ===\n'
+printf '\n=== OpenResty LuaJIT regression (11 suites) ===\n'
 for pair in "${lua_tests[@]}"; do
   test_name="${pair%%:*}"
   source_name="${pair#*:}"

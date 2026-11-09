@@ -5,42 +5,11 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from dasapp.models import CustomUser
 from django.contrib.auth import get_user_model
-import redis  # [NEW] Để kết nối Redis
 
 User = get_user_model()
 
-# [NEW] Helper function để ghi nhận brute-force từ Django
-def record_login_attempt(request, success=False):
-    """
-    Ghi nhận login attempt vào Redis để Nginx có thể tracking.
-    - Success: Ghi nhận timestamp thành công (NOT reset counter!)
-    - Failed: Ghi nhận attempt (Nginx sẽ làm việc này)
-    """
-    try:
-        client_ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', ''))
-        if ',' in client_ip:
-            client_ip = client_ip.split(',')[0].strip()
-        
-        r = redis.Redis(host='redis', port=6379, db=0, socket_connect_timeout=2, socket_timeout=2)
-        
-        if success:
-            # [FIXED] Không xóa counter nữa!
-            # Chỉ ghi nhận success time để tracking
-            success_key = f"brute_force:success:{client_ip}"
-            r.set(success_key, "1", ex=900)  # TTL = 15 phút (BRUTE_FORCE_WINDOW)
-            print(f"[LOGIN_TRACKING] Login SUCCESS for IP {client_ip} - counter preserved")
-        else:
-            # Nginx sẽ xử lý ghi nhận failed attempt
-            pass
-            
-        r.close()
-    except Exception as e:
-        print(f"[LOGIN_TRACKING] Redis error: {e}")
-        pass
-
 def BASE(request):
     return render(request,'base.html')
-
 
 def LOGIN(request):
     return render(request,'login.html')
@@ -60,7 +29,6 @@ def doLogin(request):
                                          )
         if user!=None:
             login(request,user)
-            record_login_attempt(request, success=True)  # [NEW] Ghi nhận success
 
             user_type = user.user_type
             
@@ -90,7 +58,6 @@ def doLogin(request):
             resp['X-Login-Status'] = 'failed'
             return resp
 
-
 login_required(login_url='/')
 def PROFILE(request):
     user = CustomUser.objects.get(id = request.user.id)
@@ -98,6 +65,7 @@ def PROFILE(request):
         "user":user,
     }
     return render(request,'profile.html',context)
+
 @login_required(login_url = '/')
 def PROFILE_UPDATE(request):
     if request.method == "POST":
@@ -126,7 +94,6 @@ def PROFILE_UPDATE(request):
             messages.error(request,"Your profile updation has been failed")
     return render(request, 'profile.html')
 
-
 def CHANGE_PASSWORD(request):
      context ={}
      ch = User.objects.filter(id = request.user.id)
@@ -145,7 +112,7 @@ def CHANGE_PASSWORD(request):
           user.save()
           messages.success(request,'Password Change  Succeesfully!!!')
           user = User.objects.get(username=un)
-          login(request,user)
+          login(request, user)
         else:
           messages.success(request,'Current Password wrong!!!')
           return redirect("change_password")
