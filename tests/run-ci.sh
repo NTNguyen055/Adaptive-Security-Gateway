@@ -26,14 +26,44 @@ lua_tests=(
   'test_risk_reputation_ttl:risk_engine'
 )
 
+# Docker CLI talks to the host Docker Engine through the socket.
+# Translate Jenkins container paths to paths visible on the Docker host.
+DOCKER_WORKSPACE_ROOT="$ROOT"
+
+if [ -n "${WORKSPACE:-}" ] && [ -n "${JENKINS_HOME:-}" ]; then
+  case "$WORKSPACE" in
+    "$JENKINS_HOME"/*)
+      JENKINS_HOST_HOME="$(
+        docker inspect \
+          --format '{{range .Mounts}}{{if eq .Destination "/var/jenkins_home"}}{{.Source}}{{end}}{{end}}' \
+          asg-jenkins 2>/dev/null || true
+      )"
+
+      if [ -n "$JENKINS_HOST_HOME" ]; then
+        DOCKER_WORKSPACE_ROOT="${JENKINS_HOST_HOME}${WORKSPACE#"$JENKINS_HOME"}"
+      fi
+      ;;
+  esac
+fi
+
+DOCKER_TESTS_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/tests"
+DOCKER_LUA_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/lua"
+
+if [ ! -d "$DOCKER_TESTS_DIR" ] || [ ! -d "$DOCKER_LUA_DIR" ]; then
+  echo "FAIL: Docker host cannot access Lua test directories" >&2
+  echo "Tests: $DOCKER_TESTS_DIR" >&2
+  echo "Lua:   $DOCKER_LUA_DIR" >&2
+  exit 1
+fi
+
 printf '\n=== OpenResty LuaJIT regression (10 suites) ===\n'
 for pair in "${lua_tests[@]}"; do
   test_name="${pair%%:*}"
   source_name="${pair#*:}"
   printf '\n--- %s ---\n' "$test_name"
   docker run --rm --network none \
-    --mount "type=bind,source=${ROOT}/nginx/tests,target=/asg-tests,readonly" \
-    --mount "type=bind,source=${ROOT}/nginx/lua,target=/asg-lua,readonly" \
+    --mount "type=bind,source=${DOCKER_TESTS_DIR},target=/asg-tests,readonly" \
+    --mount "type=bind,source=${DOCKER_LUA_DIR},target=/asg-lua,readonly" \
     --entrypoint /usr/local/openresty/luajit/bin/luajit \
     "${GW_IMAGE}:${IMAGE_TAG}" \
     "/asg-tests/${test_name}.lua" "/asg-lua/${source_name}.lua"
