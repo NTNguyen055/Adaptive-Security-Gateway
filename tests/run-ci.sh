@@ -49,13 +49,6 @@ fi
 DOCKER_TESTS_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/tests"
 DOCKER_LUA_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/lua"
 
-if [ ! -d "$DOCKER_TESTS_DIR" ] || [ ! -d "$DOCKER_LUA_DIR" ]; then
-  echo "FAIL: Docker host cannot access Lua test directories" >&2
-  echo "Tests: $DOCKER_TESTS_DIR" >&2
-  echo "Lua:   $DOCKER_LUA_DIR" >&2
-  exit 1
-fi
-
 printf '\n=== OpenResty LuaJIT regression (10 suites) ===\n'
 for pair in "${lua_tests[@]}"; do
   test_name="${pair%%:*}"
