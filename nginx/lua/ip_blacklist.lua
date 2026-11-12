@@ -39,7 +39,7 @@ function _M.run(ctx)
     ctx.security = ctx.security or {}
     ctx.security.signals = ctx.security.signals or {}
     local ip = ctx.security.client_ip
-        or ngx.var.realip_remote_addr or ngx.var.remote_addr
+        or ngx.var.remote_addr or ngx.var.realip_remote_addr
     if not ip then return end
 
     local cache = ngx.shared and ngx.shared.ip_cache

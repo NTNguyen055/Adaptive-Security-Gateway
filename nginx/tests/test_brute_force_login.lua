@@ -31,6 +31,8 @@ local function run_case(config, verify)
         sets = {},
         cache = {},
         cache_ttls = {},
+        emergency_cache = {},
+        emergency_cache_ttls = {},
         telegram = {},
         closed = 0,
         connected_db = nil,
@@ -134,17 +136,42 @@ local function run_case(config, verify)
         end,
     }
 
-    local cache = {}
+    local function create_shared_dict(storage, ttls, should_fail)
+        local dict = {}
 
-    function cache:set(key, value, ttl)
-        if config.cache_error then
-            return nil, "simulated shared dictionary failure"
+        function dict:get(key)
+            return storage[key]
         end
 
-        state.cache[key] = value
-        state.cache_ttls[key] = ttl
-        return true
+        function dict:set(key, value, ttl)
+            if should_fail() then
+                return nil, "simulated shared dictionary failure"
+            end
+
+            storage[key] = value
+            ttls[key] = ttl
+
+            return true
+        end
+
+        return dict
     end
+
+    local cache = create_shared_dict(
+        state.cache,
+        state.cache_ttls,
+        function()
+            return config.cache_error == true
+        end
+    )
+
+    local emergency_cache = create_shared_dict(
+        state.emergency_cache,
+        state.emergency_cache_ttls,
+        function()
+            return config.emergency_cache_error == true
+        end
+    )
 
     _G.ngx = {
         null = null_value,
@@ -162,6 +189,7 @@ local function run_case(config, verify)
 
         shared = {
             ip_cache = cache,
+            brute_force_cache = emergency_cache,
         },
 
         now = function()
@@ -191,6 +219,263 @@ local function run_case(config, verify)
 
     verify(ctx, state, result)
 end
+
+local function run_prelogin_case(config, verify)
+    local state = {
+        gets = {},
+        closed = 0,
+        connected_db = nil,
+        emergency_cache = {},
+        ip_cache = {},
+    }
+
+    if config.emergency_lock then
+        state.emergency_cache["bf:emergency:" .. IP] = 1
+    end
+
+    if config.gateway_degraded then
+        state.emergency_cache["bf:gateway_degraded"] = 1
+    end
+
+    os.getenv = function(name)
+        if name == "BRUTE_FORCE_MAX_ATTEMPTS" then return "5" end
+        if name == "BRUTE_FORCE_WINDOW" then return "300" end
+        if name == "BRUTE_FORCE_COOLDOWN" then return "3600" end
+        if name == "BRUTE_FORCE_RISK_PENALTY" then return "80" end
+        return original_getenv(name)
+    end
+
+    local null_value = {}
+    local red = {}
+
+    function red:get(key)
+        state.gets[#state.gets + 1] = key
+
+        if config.get_error then
+            return nil, "simulated Redis GET failure"
+        end
+
+        if key == "brute_force:lockout:" .. IP then
+            return config.lockout or null_value
+        end
+
+        if key == "brute_force:fail:" .. IP then
+            return config.attempts or null_value
+        end
+
+        error("Unexpected Redis GET key: " .. tostring(key))
+    end
+
+    package.loaded["redis_helper"] = {
+        get_redis = function(db)
+            state.connected_db = db
+
+            if config.connection_error then
+                return nil, "simulated Redis connection failure"
+            end
+
+            return red
+        end,
+
+        close = function(connection)
+            eq(connection, red, "Redis connection passed to close")
+            state.closed = state.closed + 1
+        end,
+    }
+
+    package.loaded["telegram_alert"] = {
+        send = function()
+            error("Unexpected Telegram call during pre-login")
+        end,
+    }
+
+    _G.ngx = {
+        null = null_value,
+
+        ERR = 3,
+        WARN = 4,
+        INFO = 6,
+        DEBUG = 7,
+        ALERT = 1,
+
+        var = {
+            realip_remote_addr = IP,
+            remote_addr = IP,
+        },
+
+        shared = {
+            brute_force_cache = {
+                get = function(_, key)
+                    return state.emergency_cache[key]
+                end,
+
+                set = function(_, key, value, ttl)
+                    state.emergency_cache[key] = value
+                    return true
+                end,
+            },
+
+            ip_cache = {
+                get = function(_, key)
+                    return state.ip_cache[key]
+                end,
+
+                set = function(_, key, value, ttl)
+                    state.ip_cache[key] = value
+                    return true
+                end,
+            },
+        },
+
+        now = function()
+            return 123.456
+        end,
+
+        log = function() end,
+    }
+
+    local chunk, load_error = loadfile(source)
+
+    if not chunk then
+        error("Cannot load source: " .. tostring(load_error))
+    end
+
+    local module = chunk()
+
+    local ctx = {
+        client_ip = IP,
+    }
+
+    local result, err = module.check_prelogin(ctx)
+
+    verify(ctx, state, result, err)
+end
+
+local function prelogin_case(name, config, verify)
+    local ok, err = pcall(run_prelogin_case, config, verify)
+
+    if ok then
+        passed = passed + 1
+        print("PASS  " .. name)
+    else
+        failed = failed + 1
+        print("FAIL  " .. name .. ": " .. tostring(err))
+    end
+end
+
+prelogin_case(
+    "pre-login allows IP below failure threshold",
+    {
+        attempts = "2",
+    },
+    function(ctx, state, result, err)
+        eq(result, false, "pre-login result")
+        eq(err, nil, "pre-login error")
+        eq(state.connected_db, 0, "Redis database")
+        eq(state.closed, 1, "Redis connection close")
+        eq(#state.gets, 2, "Redis GET count")
+        eq(
+            state.gets[1],
+            "brute_force:lockout:" .. IP,
+            "lockout key"
+        )
+        eq(
+            state.gets[2],
+            "brute_force:fail:" .. IP,
+            "failure counter key"
+        )
+        eq(ctx.brute_force, nil, "brute-force state")
+    end
+)
+
+prelogin_case(
+    "pre-login blocks IP with existing lockout",
+    {
+        lockout = "1",
+    },
+    function(ctx, state, result)
+        eq(result, true, "pre-login result")
+        eq(state.closed, 1, "Redis connection close")
+        eq(#state.gets, 1, "GET count")
+        eq(ctx.brute_force.is_locked, true, "lockout state")
+        eq(ctx.brute_force.action, "block_prelogin", "action")
+    end
+)
+
+prelogin_case(
+    "pre-login fails closed when Redis connection fails",
+    {
+        connection_error = true,
+    },
+    function(ctx, state, result, err)
+        eq(result, nil, "pre-login result")
+        assert(err ~= nil, "Redis error must be returned")
+        eq(state.closed, 0, "Redis connection close")
+        eq(#state.gets, 0, "Redis GET count")
+        eq(ctx.brute_force, nil, "brute-force state")
+    end
+)
+
+prelogin_case(
+    "pre-login fails closed when Redis GET fails",
+    {
+        get_error = true,
+    },
+    function(ctx, state, result, err)
+        eq(result, nil, "pre-login result")
+        assert(err ~= nil, "Redis GET error must be returned")
+        eq(state.closed, 1, "Redis connection close")
+        eq(#state.gets, 1, "GET count")
+    end
+)
+
+prelogin_case(
+    "pre-login blocks when failure counter reaches threshold",
+    {
+        attempts = "5",
+    },
+    function(ctx, state, result)
+        eq(result, true, "pre-login result")
+        eq(state.closed, 1, "Redis connection close")
+        eq(#state.gets, 2, "Redis GET count")
+        eq(ctx.brute_force.is_locked, true, "lockout state")
+        eq(ctx.brute_force.action, "block_prelogin", "action")
+        eq(ctx.brute_force.attempt_count, 5, "failure counter")
+    end
+)
+
+prelogin_case(
+    "pre-login blocks IP with emergency lock without Redis",
+    {
+        emergency_lock = true,
+        connection_error = true,
+    },
+    function(ctx, state, result, err)
+        eq(result, true, "pre-login result")
+        eq(err, nil, "pre-login error")
+        eq(state.connected_db, nil, "Redis must not be connected")
+        eq(state.closed, 0, "Redis connection close")
+        eq(#state.gets, 0, "Redis GET count")
+        eq(ctx.brute_force.is_locked, true, "emergency lock state")
+        eq(ctx.brute_force.action, "emergency_lock", "action")
+    end
+)
+
+prelogin_case(
+    "pre-login rejects all logins when gateway is degraded",
+    {
+        gateway_degraded = true,
+        connection_error = true,
+    },
+    function(ctx, state, result, err)
+        eq(result, nil, "pre-login result")
+        eq(err, "gateway security degraded", "degraded error")
+        eq(state.connected_db, nil, "Redis must not be connected")
+        eq(state.closed, 0, "Redis connection close")
+        eq(#state.gets, 0, "Redis GET count")
+        eq(ctx.brute_force, nil, "brute-force state")
+    end
+)
 
 local function case(name, config, verify)
     local ok, err = pcall(run_case, config, verify)
@@ -322,32 +607,96 @@ case(
 )
 
 case(
-    "Redis connection failure does not punish or block client",
+    "Redis connection failure activates emergency lock",
     {
         connection_error = true,
     },
     function(ctx, state, result)
-        eq(result, false, "record_failed_attempt return")
+        local emergency_key = "bf:emergency:" .. IP
+
+        eq(result, true, "record_failed_attempt return")
         eq(#state.evals, 0, "no EVAL without Redis")
         eq(#state.telegram, 0, "no Telegram without Redis")
         eq(state.closed, 0, "no connection to close")
+
+        eq(
+            state.emergency_cache[emergency_key],
+            1,
+            "emergency lock"
+        )
+        eq(
+            state.emergency_cache_ttls[emergency_key],
+            3600,
+            "emergency lock TTL"
+        )
+
         eq(ctx.brute_force, nil, "no brute-force state")
         eq(ctx.security.block, nil, "no security block")
     end
 )
 
 case(
-    "counter failure stops processing without false block",
+    "counter failure activates emergency lock",
     {
         counter_error = true,
     },
     function(ctx, state, result)
-        eq(result, false, "record_failed_attempt return")
+        local emergency_key = "bf:emergency:" .. IP
+
+        eq(result, true, "record_failed_attempt return")
         eq(#state.evals, 1, "only counter EVAL")
         eq(#state.telegram, 0, "no Telegram")
-        eq(state.cache["bl:" .. IP], nil, "no cache update")
         eq(state.closed, 1, "Redis connection close")
+
+        eq(
+            state.emergency_cache[emergency_key],
+            1,
+            "emergency lock"
+        )
+        eq(
+            state.emergency_cache_ttls[emergency_key],
+            3600,
+            "emergency lock TTL"
+        )
+
+        eq(state.cache["bl:" .. IP], nil, "no blacklist cache update")
         eq(ctx.security.block, nil, "no security block")
+    end
+)
+
+case(
+    "emergency lock falls back to ip_cache",
+    {
+        connection_error = true,
+        emergency_cache_error = true,
+    },
+    function(ctx, state, result)
+        local emergency_key = "bf:emergency:" .. IP
+
+        eq(result, true, "record_failed_attempt return")
+
+        -- Primary dictionary must fail.
+        eq(
+            state.emergency_cache[emergency_key],
+            nil,
+            "brute_force_cache must remain empty"
+        )
+
+        -- Secondary dictionary must receive the emergency lock.
+        eq(
+            state.cache[emergency_key],
+            1,
+            "ip_cache emergency lock"
+        )
+        eq(
+            state.cache_ttls[emergency_key],
+            3600,
+            "ip_cache emergency lock TTL"
+        )
+
+        eq(#state.evals, 0, "no Redis EVAL")
+        eq(#state.telegram, 0, "no Telegram")
+        eq(state.closed, 0, "no Redis connection to close")
     end
 )
 

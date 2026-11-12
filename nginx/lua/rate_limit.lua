@@ -43,8 +43,8 @@ function _M.run(ctx)
     if not limiter then return end
 
     local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
 
     -- Chỉ dùng IP làm Key (Bỏ URI)
     -- Lý do: Ngăn chặn Hacker Bypass Limit bằng cách liên tục thay đổi URI request

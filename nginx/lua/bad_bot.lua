@@ -110,8 +110,8 @@ function _M.run(ctx)
     -- 2. real_ip module
     -- 3. remote_addr
     local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
 
     -- Lấy User-Agent từ HTTP Header.
     local ua = ngx.var.http_user_agent

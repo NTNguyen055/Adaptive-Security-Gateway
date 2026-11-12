@@ -4,7 +4,7 @@ name: adaptive-security-local
 
 services:
   db:
-    image: mysql:8.4
+    image: mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: ${DB_NAME:?Run python scripts/init-local-env.py first}
@@ -24,7 +24,7 @@ services:
       - internal
 
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
     restart: unless-stopped
     command:
       - redis-server
@@ -127,7 +127,7 @@ services:
       - internal
 
   prometheus:
-    image: prom/prometheus:v3.4.2
+    image: prom/prometheus@sha256:3b1d5be5c3eef4f027665ddaa3b1a7de8a58d96a0a6de5dd45629afd267ecaf0
     profiles: [monitoring]
     restart: unless-stopped
     # Stage 1.6 local monitoring: bound historical TSDB growth.
@@ -146,7 +146,7 @@ services:
       - internal
 
   grafana:
-    image: grafana/grafana:12.0.2
+    image: grafana/grafana@sha256:b5b59bfc7561634c2d7b136c4543d702ebcc94a3da477f21ff26f89ffd4214fa
     profiles: [monitoring]
     restart: unless-stopped
     environment:

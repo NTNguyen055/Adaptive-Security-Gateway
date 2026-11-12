@@ -83,8 +83,8 @@ function _M.run(ctx)
     end
 
     local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
 
     local auth_header = ngx.var.http_authorization
 
