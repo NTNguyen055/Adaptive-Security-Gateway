@@ -57,8 +57,8 @@ return redis.call('ZCARD', key)
 -- ============================================================
 function _M.run(ctx)
     local ip  = (ctx.security and ctx.security.client_ip)
-                or ngx.var.realip_remote_addr
                 or ngx.var.remote_addr
+                or ngx.var.realip_remote_addr
     local uri = ngx.var.uri or ""
 
     ctx.security         = ctx.security or {}

@@ -68,8 +68,8 @@ function _M.run(ctx)
     -- CORE: Xác định IP thực của Client. Ưu tiên lấy từ biến ctx.security đã được
     -- module khác xử lý (ví dụ: bóc tách từ Cloudflare/Proxy), nếu không có mới dùng IP gốc của Nginx.
     local ip = (ctx.security and ctx.security.client_ip)
-        or ngx.var.realip_remote_addr
         or ngx.var.remote_addr
+        or ngx.var.realip_remote_addr
 
     ctx.security = ctx.security or {}
     ctx.security.signals = ctx.security.signals or {}

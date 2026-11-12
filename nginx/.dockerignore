@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Secrets and credentials
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Tests are not required in the runtime image
+tests/
+**/tests/
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+logs/
+*.log
+**/__pycache__/
+**/*.pyc

@@ -1,4 +1,4 @@
-FROM openresty/openresty:alpine-fat
+FROM openresty/openresty@sha256:2f1d99e7ed07740450013b52102842c366f1ef958e94811454cc5bca7ed98d38
 
 # Thêm chuẩn OCI Labels để dễ dàng truy vết (Traceability)
 ARG BUILD_DATE
@@ -13,6 +13,13 @@ LABEL org.opencontainers.image.title="Adaptive Security Gateway" \
       org.opencontainers.image.version="${VERSION}"
 
 # ================= BASE =================
+# NON-ROOT USER
+# Tạo user không có quyền root để giảm attack surface nếu gateway bị compromise.
+# UID/GID cố định 101 để volume permissions nhất quán giữa các lần build.
+# LUA ROCKS
+# DIR
+# DUMMY SSL
+# Tạo chứng chỉ giả để Nginx có thể khởi động thành công lần đầu
 RUN apk add --no-cache \
     ca-certificates \
     libmaxminddb \
@@ -22,32 +29,22 @@ RUN apk add --no-cache \
     curl \
     && cp /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime \
     && echo "Asia/Ho_Chi_Minh" > /etc/timezone \
-    && update-ca-certificates
-
-# ================= NON-ROOT USER =================
-# Tạo user không có quyền root để giảm attack surface nếu gateway bị compromise.
-# UID/GID cố định 101 để volume permissions nhất quán giữa các lần build.
-RUN addgroup -g 101 -S gateway \
-    && adduser -u 101 -S -G gateway -H -D gateway
-
-# ================= LUA ROCKS =================
-RUN luarocks install lua-resty-jwt 0.2.3 \
-    && luarocks install lua-resty-http 0.17.2
-
-# ================= DIR =================
-RUN mkdir -p \
-    /usr/local/openresty/nginx/lua \
-    /usr/local/openresty/nginx/logs \
-    /usr/local/openresty/lualib/resty \
-    /etc/nginx/geoip \
-    /etc/letsencrypt/live/dacn3.duckdns.org
-
-# ================= DUMMY SSL =================
-# Tạo chứng chỉ giả để Nginx có thể khởi động thành công lần đầu
-RUN openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
-    -keyout /etc/letsencrypt/live/dacn3.duckdns.org/privkey.pem \
-    -out /etc/letsencrypt/live/dacn3.duckdns.org/fullchain.pem \
-    -subj "/CN=dacn3.duckdns.org"
+    && update-ca-certificates \
+    && addgroup -g 101 -S gateway \
+    && adduser -u 101 -S -G gateway -H -D gateway \
+    && luarocks install lua-resty-jwt 0.2.3 \
+    && luarocks install lua-resty-http 0.17.2 \
+    && mkdir -p \
+        /usr/local/openresty/nginx/lua \
+        /usr/local/openresty/nginx/logs \
+        /usr/local/openresty/lualib/resty \
+        /etc/nginx/geoip \
+        /etc/letsencrypt/live/asg-datn.duckdns.org \
+    && openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+        -keyout /etc/letsencrypt/live/asg-datn.duckdns.org/privkey.pem \
+        -out /etc/letsencrypt/live/asg-datn.duckdns.org/fullchain.pem \
+        -subj "/CN=asg-datn.duckdns.org"\
+    && chmod 600 /etc/letsencrypt/live/asg-datn.duckdns.org/privkey.pem
 
 # ================= COPY VENDOR =================
 # Đưa thư mục vendor (chứa maxminddb, prometheus, v.v.) vào image
@@ -58,7 +55,7 @@ COPY vendor/prometheus*.lua /usr/local/openresty/lualib/
 COPY GeoLite2-Country.mmdb /etc/nginx/geoip/GeoLite2-Country.mmdb
 
 # ================= CONFIG & LUA SCRIPTS =================
-# Copy Nginx config và toàn bộ các file Lua 
+# Copy Nginx config và toàn bộ các file Lua
 COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY lua/ /usr/local/openresty/nginx/lua/
 

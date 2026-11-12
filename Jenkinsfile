@@ -24,7 +24,7 @@ pipeline {
         BASE_DIR = '/home/ubuntu/appointment-web'
         APP_DIR = '/home/ubuntu/appointment-web/Adaptive-Security-Gateway'
         ENV_PATH = '/home/ubuntu/appointment-web/.env'
-        HEALTH_DOMAIN = 'dacn3.duckdns.org'
+        HEALTH_DOMAIN = 'asg-datn.duckdns.org'
         HEALTH_RETRIES = '12'
         COMPOSE_TIMEOUT = '120'
     }
@@ -164,7 +164,7 @@ pipeline {
             }
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-cred-AGWS',
+                    credentialsId: 'dockerhub-cred-ASG',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
@@ -215,35 +215,71 @@ FETCHED_SHA=$(git rev-parse FETCH_HEAD)
 if [ "$FETCHED_SHA" != "$SOURCE_COMMIT" ]; then
     fail "EC2 main=$FETCHED_SHA differs from Jenkins image source=$SOURCE_COMMIT; refusing deploy"
 fi
+
 # Do not modify the running EC2 checkout until images are fetched and validated.
-log '[3] Saving rollback tags...'
-docker tag "${APP_IMAGE}:latest" "${APP_IMAGE}:rollback" 2>/dev/null || true
-docker tag "${GW_IMAGE}:latest" "${GW_IMAGE}:rollback" 2>/dev/null || true
+log '[3] Validating previous production images...'
+
+# Normal deployment requires BOTH previous images.
+if ! docker image inspect "${APP_IMAGE}:latest" >/dev/null 2>&1; then
+    fail "Previous APP image missing: ${APP_IMAGE}:latest. Bootstrap deployment required."
+fi
+
+if ! docker image inspect "${GW_IMAGE}:latest" >/dev/null 2>&1; then
+    fail "Previous GATEWAY image missing: ${GW_IMAGE}:latest. Bootstrap deployment required."
+fi
+
+# Preserve exact previous images before pulling or retagging new releases.
+docker tag "${APP_IMAGE}:latest" "${APP_IMAGE}:rollback"
+docker tag "${GW_IMAGE}:latest" "${GW_IMAGE}:rollback"
+
+PREV_APP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${APP_IMAGE}:rollback")
+PREV_GW_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${GW_IMAGE}:rollback")
 
 log '[4] Pulling release images...'
 docker pull "${APP_IMAGE}:${IMAGE_TAG}"
 docker pull "${GW_IMAGE}:${IMAGE_TAG}"
+
 # Each built image must have the source revision recorded by its Dockerfile.
 for spec in "${APP_IMAGE}:${IMAGE_TAG}" "${GW_IMAGE}:${IMAGE_TAG}"; do
     LABEL_SHA=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$spec")
     [ "$LABEL_SHA" = "$SOURCE_COMMIT" ] || fail "Image source label mismatch: $spec"
 done
-docker tag "${APP_IMAGE}:${IMAGE_TAG}" "${APP_IMAGE}:latest"
-docker tag "${GW_IMAGE}:${IMAGE_TAG}" "${GW_IMAGE}:latest"
 
 do_rollback() {
     log 'Rolling back previous code/images...'
-    docker compose --env-file "$ENV_PATH" down --remove-orphans || true
-    git reset --hard "$PREV_COMMIT" || true
-    docker tag "${APP_IMAGE}:rollback" "${APP_IMAGE}:latest" 2>/dev/null || true
-    docker tag "${GW_IMAGE}:rollback" "${GW_IMAGE}:latest" 2>/dev/null || true
-    docker compose --env-file "$ENV_PATH" up -d --wait \
-        --wait-timeout "$COMPOSE_TIMEOUT" --remove-orphans || log 'Rollback startup failed'
+
+    local rollback_ok=1
+
+    docker compose --env-file "$ENV_PATH" down --remove-orphans || rollback_ok=0
+    git reset --hard "$PREV_COMMIT" || rollback_ok=0
+
+    docker image tag "${APP_IMAGE}:rollback" "${APP_IMAGE}:latest" || rollback_ok=0
+    docker image tag "${GW_IMAGE}:rollback" "${GW_IMAGE}:latest" || rollback_ok=0
+
+    # Verify that the exact previous images have been restored.
+    CURRENT_APP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${APP_IMAGE}:latest" 2>/dev/null || true)
+    CURRENT_GW_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${GW_IMAGE}:latest" 2>/dev/null || true)
+
+    [ "$CURRENT_APP_IMAGE_ID" = "$PREV_APP_IMAGE_ID" ] || rollback_ok=0
+    [ "$CURRENT_GW_IMAGE_ID" = "$PREV_GW_IMAGE_ID" ] || rollback_ok=0
+
+    if [ "$rollback_ok" -ne 1 ]; then
+        log 'CRITICAL: Rollback restoration failed. Production containers will remain stopped.'
+        return 1
+    fi
+
+    if ! docker compose --env-file "$ENV_PATH" up -d --wait \
+        --wait-timeout "$COMPOSE_TIMEOUT" --remove-orphans; then
+        log 'CRITICAL: Previous images restored but rollback startup failed.'
+        return 1
+    fi
+
+    log 'Rollback completed successfully.'
 }
 
 log '[5] Switching source to the verified release commit...'
 if ! git reset --hard "$SOURCE_COMMIT"; then
-    do_rollback
+    do_rollback || log 'CRITICAL: Rollback incomplete; manual recovery required.'
     fail 'Cannot switch EC2 source to release commit'
 fi
 git clean -fd -e logs/
@@ -252,32 +288,47 @@ mkdir -p "$APP_DIR/logs/nginx"
 log '[6] Starting Compose and verifying health...'
 if ! docker compose --env-file "$ENV_PATH" up -d --wait \
     --wait-timeout "$COMPOSE_TIMEOUT" --remove-orphans; then
-    do_rollback
+    do_rollback || log 'CRITICAL: Rollback incomplete; manual recovery required.'
     fail 'Compose deployment failed'
 fi
 
 HTTP_OK=0
+HTTP_CODE="000"
+HTTPS_CODE="000"
+
 for ((i=1; i<=HEALTH_RETRIES; i++)); do
-    HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-        -H "Host: $HEALTH_DOMAIN" -H 'X-Forwarded-Proto: https' \
-        http://localhost/health/ || true)
-    SEC_CODE=$(curl -k -s -o /dev/null -w '%{http_code}' \
-        -A 'healthchecker' -H "Host: $HEALTH_DOMAIN" \
-        https://localhost/login/ || true)
-    if [ "$HTTP_CODE" = 200 ] && [ "$SEC_CODE" = 200 ]; then
+    # HTTP: kiểm tra Nginx -> Django, giữ đúng Host.
+    HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 4 --max-time 6 \
+        -H "Host: $HEALTH_DOMAIN" \
+        -H 'X-Forwarded-Proto: https' \
+        http://127.0.0.1/health/ || true)
+
+    # HTTPS: kiểm tra TLS, certificate hostname và Nginx -> Django.
+    # --resolve giữ SNI/Host là domain production nhưng kết nối loopback.
+    HTTPS_CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 4 --max-time 6 \
+        --resolve "$HEALTH_DOMAIN:443:127.0.0.1" \
+        "https://$HEALTH_DOMAIN/health/" || true)
+
+    if [ "$HTTP_CODE" = "200" ] && [ "$HTTPS_CODE" = "200" ]; then
         HTTP_OK=1
         break
     fi
+
+    log "Health check attempt $i/$HEALTH_RETRIES failed (HTTP=$HTTP_CODE, HTTPS=$HTTPS_CODE)"
     sleep 10
 done
+
 if [ "$HTTP_OK" -ne 1 ]; then
-    do_rollback
-    fail "HTTP health checks failed (http=$HTTP_CODE, login=$SEC_CODE)"
+    do_rollback || log 'CRITICAL: Rollback incomplete; manual recovery required.'
+    fail "HTTP/HTTPS health checks failed (http=$HTTP_CODE, https=$HTTPS_CODE)"
 fi
+
 for svc in docapp_django docapp_redis openresty_gateway; do
     STATUS=$(docker inspect --format '{{.State.Status}}' "$svc" 2>/dev/null || true)
     if [ "$STATUS" != running ]; then
-        do_rollback
+        do_rollback || log 'CRITICAL: Rollback incomplete; manual recovery required.'
         fail "Container $svc is not running"
     fi
 done
@@ -285,19 +336,42 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
 '''
                     writeFile file: 'deploy.sh', text: deployScript
                 }
-                withCredentials([string(credentialsId: 'ec2-prod-ip', variable: 'EC2_APP_IP')]) {
+                withCredentials([
+                    string(
+                        credentialsId: 'ec2-prod-ip',
+                        variable: 'EC2_APP_IP'
+                    ),
+                    file(
+                        credentialsId: 'ec2-prod-known-hosts',
+                        variable: 'KNOWN_HOSTS_FILE'
+                    )
+                ]) {
                     sshagent(credentials: ['app-server-ssh']) {
                         sh '''
                             set -eu
-                            mkdir -p "$HOME/.ssh"
-                            chmod 700 "$HOME/.ssh"
-                            if ! ssh-keygen -F "$EC2_APP_IP" >/dev/null; then
-                                ssh-keyscan -H "$EC2_APP_IP" >> "$HOME/.ssh/known_hosts"
-                            fi
-                            chmod 644 "$HOME/.ssh/known_hosts"
-                            ssh -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+
+                            echo "Checking pinned SSH host key..."
+
+                            test -n "$EC2_APP_IP"
+                            test -s "$KNOWN_HOSTS_FILE"
+
+                            ssh-keygen -F "$EC2_APP_IP" \
+                                -f "$KNOWN_HOSTS_FILE" >/dev/null || {
+                                    echo "FAILED: No pinned SSH host key for $EC2_APP_IP" >&2
+                                    exit 1
+                                }
+
+                            echo "Pinned SSH host key found."
+
+                            ssh \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=yes \
+                                -o UpdateHostKeys=no \
+                                -o UserKnownHostsFile="$KNOWN_HOSTS_FILE" \
+                                -o GlobalKnownHostsFile=/dev/null \
+                                -o ConnectTimeout=15 \
                                 "$EC2_USER@$EC2_APP_IP" \
-                                "APP_IMAGE=$APP_IMAGE GW_IMAGE=$GW_IMAGE IMAGE_TAG=$IMAGE_TAG SOURCE_COMMIT=$SOURCE_COMMIT APP_DIR=$APP_DIR BASE_DIR=$BASE_DIR ENV_PATH=$ENV_PATH HEALTH_DOMAIN=$HEALTH_DOMAIN HEALTH_RETRIES=$HEALTH_RETRIES COMPOSE_TIMEOUT=$COMPOSE_TIMEOUT bash -s" < deploy.sh
+                                "APP_IMAGE='$APP_IMAGE' GW_IMAGE='$GW_IMAGE' IMAGE_TAG='$IMAGE_TAG' SOURCE_COMMIT='$SOURCE_COMMIT' APP_DIR='$APP_DIR' BASE_DIR='$BASE_DIR' ENV_PATH='$ENV_PATH' HEALTH_DOMAIN='$HEALTH_DOMAIN' HEALTH_RETRIES='$HEALTH_RETRIES' COMPOSE_TIMEOUT='$COMPOSE_TIMEOUT' bash -s" < deploy.sh
                         '''
                     }
                 }

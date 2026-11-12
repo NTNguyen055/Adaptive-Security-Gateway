@@ -164,8 +164,8 @@ function _M.run(ctx)
     local cfg = get_config()
 
     local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
 
     ctx.security         = ctx.security or {}
     local base_risk      = ctx.security.risk or 0

@@ -22,26 +22,28 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: 
-        - "CMD-SHELL"
-        - "python -c \"import urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/health/', headers={'X-Forwarded-Proto': 'https', 'Host': 'localhost'}); urllib.request.urlopen(req)\" || exit 1"
-      interval: 15s
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; host = next((h.strip() for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h.strip()), 'localhost'); req = urllib.request.Request('http://127.0.0.1:8000/health/', headers={'X-Forwarded-Proto': 'https', 'Host': host}); urllib.request.urlopen(req, timeout=3)"
+      interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
-      
+      start_period: 60s
+
     command: >
       sh -c "
       python manage.py migrate --noinput &&
-      gunicorn docappsystem.wsgi:application 
-      --bind 0.0.0.0:8000 
-      --workers $${GUNICORN_WORKERS:-2} 
-      --threads $${GUNICORN_THREADS:-2} 
-      --timeout $${GUNICORN_TIMEOUT:-60} 
-      --max-requests 1000 
-      --max-requests-jitter 100 
-      --access-logfile - 
-      --error-logfile - 
+      exec gunicorn docappsystem.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers $${GUNICORN_WORKERS:-2}
+      --threads $${GUNICORN_THREADS:-2}
+      --timeout $${GUNICORN_TIMEOUT:-60}
+      --max-requests 1000
+      --max-requests-jitter 100
+      --access-logfile -
+      --error-logfile -
       --log-level info
       "
 
@@ -62,11 +64,10 @@ services:
     networks:
       - internal
 
-  # ===========================================================================
-  # REDIS (In-Memory Only)
-  # ===========================================================================
+
+  # REDIS — Security state persistence
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
     container_name: docapp_redis
     restart: unless-stopped
 
@@ -76,12 +77,16 @@ services:
     command: >
       redis-server
       --maxmemory 128mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
       --save ""
-      --appendonly no
+      --appendonly yes
+      --appendfsync everysec
       --tcp-keepalive 60
       --timeout 300
       --loglevel warning
+
+    volumes:
+      - redis_data:/data
 
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -93,7 +98,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 160m
+          memory: 192m
           cpus: "0.5"
         reservations:
           memory: 64m
@@ -136,7 +141,7 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf --max-time 4 -H 'Host: dacn3.duckdns.org' -H 'X-Forwarded-Proto: https' http://127.0.0.1/health/ || exit 1"]
+      test: ["CMD-SHELL", "curl -sf --max-time 4 -H 'Host: asg-datn.duckdns.org' -H 'X-Forwarded-Proto: https' http://127.0.0.1/health/ || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 3
@@ -154,14 +159,14 @@ services:
   # PROMETHEUS (Thu thập Metrics)
   # ===========================================================================
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus@sha256:3b1d5be5c3eef4f027665ddaa3b1a7de8a58d96a0a6de5dd45629afd267ecaf0
     container_name: prometheus
     restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - internal
 
@@ -169,22 +174,23 @@ services:
   # GRAFANA (Vẽ biểu đồ Dashboard)
   # ===========================================================================
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana@sha256:b5b59bfc7561634c2d7b136c4543d702ebcc94a3da477f21ff26f89ffd4214fa
     container_name: grafana
     restart: unless-stopped
     environment:
-      # [FIX] Lấy credentials từ .env thay vì hardcode 'admin/admin'.
-      # Thiết lập GRAFANA_ADMIN_PASSWORD mạnh trong file .env trước khi deploy.
+      # Credentials được lấy từ environment, không hardcode.
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
-      # Disable sign-up cho user mới để khóa cửớng Grafana khỏi Internet
+
+      # Disable self-service account registration.
       - GF_USERS_ALLOW_SIGN_UP=false
-      # Chỉ cho phép đăng nhập qua local browser (không có OAuth public)
+
+      # Disable anonymous access; authentication is required.
       - GF_AUTH_ANONYMOUS_ENABLED=false
     volumes:
       - grafana_data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
     networks:
@@ -194,6 +200,7 @@ services:
 # VOLUMES & NETWORKS
 # =============================================================================
 volumes:
+  redis_data:
   prometheus_data:
   grafana_data:
 

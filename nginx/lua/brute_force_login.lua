@@ -45,6 +45,98 @@ local function get_config()
 end
 
 -- ============================================================
+-- EMERGENCY LOCK: LOCAL SHARED MEMORY
+-- ============================================================
+local function mark_emergency_lock(ip, ttl, reason)
+    if not ip or ip == "" then
+        return false, "invalid IP"
+    end
+
+    local key = "bf:emergency:" .. ip
+    local dictionaries = {}
+
+    if ngx.shared.brute_force_cache then
+        table.insert(dictionaries, ngx.shared.brute_force_cache)
+    end
+
+    if ngx.shared.ip_cache then
+        table.insert(dictionaries, ngx.shared.ip_cache)
+    end
+
+    for _, dict in ipairs(dictionaries) do
+        if dict then
+            local ok, err = dict:set(key, 1, ttl)
+
+            if ok then
+                ngx.log(
+                    ngx.ALERT,
+                    "[BRUTE_FORCE] Emergency lock activated for IP ",
+                    ip,
+                    ", TTL=",
+                    ttl,
+                    "s, reason=",
+                    tostring(reason)
+                )
+
+                return true
+            end
+
+            ngx.log(
+                ngx.ERR,
+                "[BRUTE_FORCE] Emergency dictionary write failed: ",
+                tostring(err)
+            )
+        end
+    end
+
+    -- Không thể bảo đảm trạng thái bảo vệ theo IP.
+    -- Đánh dấu gateway degraded để pre-login fail closed.
+    for _, dict in ipairs(dictionaries) do
+        if dict then
+            local ok = dict:set("bf:gateway_degraded", 1, ttl)
+
+            if ok then
+                ngx.log(
+                    ngx.ALERT,
+                    "[BRUTE_FORCE] Gateway entered degraded security mode"
+                )
+                return false, "gateway security degraded"
+            end
+        end
+    end
+
+    ngx.log(
+        ngx.CRIT,
+        "[BRUTE_FORCE] CRITICAL: Cannot persist emergency security state"
+    )
+
+    return false, "emergency state unavailable"
+end
+
+function _M.record_failed_attempt_fallback(ctx, reason)
+    ctx = ctx or {}
+
+    local cfg = get_config()
+    local ip = ctx.client_ip
+        or ngx.var.remote_addr
+        or ngx.var.realip_remote_addr
+
+    if not ip or ip == "" then
+        ngx.log(
+            ngx.CRIT,
+            "[BRUTE_FORCE] Cannot activate fallback: missing client IP"
+        )
+        return false
+    end
+
+    return mark_emergency_lock(
+        ip,
+        cfg.cooldown_time,
+        reason or "failed attempt could not be recorded"
+    )
+end
+
+-- ============================================================
 -- REDIS ATOMIC SCRIPT: INCR + TTL
 -- ============================================================
 local INCREMENT_ATTEMPT_SCRIPT = [[
@@ -328,8 +420,8 @@ function _M.record_failed_attempt(ctx)
 
     local cfg = get_config()
     local ip = ctx.client_ip
-        or ngx.var.realip_remote_addr
         or ngx.var.remote_addr
+        or ngx.var.realip_remote_addr
 
     if not ip or ip == "" then
         ngx.log(ngx.ERR, "[BRUTE_FORCE] Cannot determine client IP")
@@ -347,7 +439,10 @@ function _M.record_failed_attempt(ctx)
             ": ",
             tostring(err)
         )
-        return false
+        return _M.record_failed_attempt_fallback(
+            {client_ip = ip},
+            "Redis connection failure"
+        )
     end
 
     -- Kiểm tra lockout trước khi tăng counter.
@@ -363,7 +458,11 @@ function _M.record_failed_attempt(ctx)
         )
 
         redis_helper.close(red)
-        return false
+
+        return _M.record_failed_attempt_fallback(
+            {client_ip = ip},
+            "Redis lockout state read failure"
+        )
     end
 
     if locked then
@@ -406,7 +505,11 @@ function _M.record_failed_attempt(ctx)
         )
 
         redis_helper.close(red)
-        return false
+
+        return _M.record_failed_attempt_fallback(
+            {client_ip = ip},
+            "Redis counter write failure"
+        )
     end
 
     ctx.brute_force = ctx.brute_force or {}
@@ -557,8 +660,8 @@ function _M.record_successful_login(ctx)
     ctx = ctx or {}
 
     local ip = ctx.client_ip
-        or ngx.var.realip_remote_addr
         or ngx.var.remote_addr
+        or ngx.var.realip_remote_addr
 
     if not ip or ip == "" then
         ngx.log(ngx.WARN, "[BRUTE_FORCE] Cannot determine IP for successful login")
@@ -624,13 +727,61 @@ end
 function _M.check_prelogin(ctx)
     ctx = ctx or {}
 
+    local cfg = get_config()
     local ip = ctx.client_ip
-        or ngx.var.realip_remote_addr
         or ngx.var.remote_addr
+        or ngx.var.realip_remote_addr
 
     if not ip or ip == "" then
-        ngx.log(ngx.WARN, "[BRUTE_FORCE] Cannot determine IP during pre-login")
-        return false
+        ngx.log(
+            ngx.ERR,
+            "[BRUTE_FORCE] Cannot determine IP during pre-login"
+        )
+        return nil, "cannot determine client IP"
+    end
+
+    -- 0. Emergency state must be checked before Redis.
+    local emergency_key = "bf:emergency:" .. ip
+
+    local emergency_dicts = {}
+
+    if ngx.shared.brute_force_cache then
+        table.insert(emergency_dicts, ngx.shared.brute_force_cache)
+    end
+
+    if ngx.shared.ip_cache then
+        table.insert(emergency_dicts, ngx.shared.ip_cache)
+    end
+
+    for _, dict in ipairs(emergency_dicts) do
+        if dict then
+            local degraded = dict:get("bf:gateway_degraded")
+
+            if degraded then
+                ngx.log(
+                    ngx.ERR,
+                    "[BRUTE_FORCE] Gateway security degraded; rejecting login"
+                )
+
+                return nil, "gateway security degraded"
+            end
+
+            local emergency_locked = dict:get(emergency_key)
+
+            if emergency_locked then
+                ctx.brute_force = ctx.brute_force or {}
+                ctx.brute_force.action = "emergency_lock"
+                ctx.brute_force.is_locked = true
+
+                ngx.log(
+                    ngx.WARN,
+                    "[BRUTE_FORCE] Emergency lock active for IP ",
+                    ip
+                )
+
+                return true
+            end
+        end
     end
 
     local red, err = redis_helper.get_redis(0)
@@ -638,19 +789,20 @@ function _M.check_prelogin(ctx)
     if not red then
         ngx.log(
             ngx.ERR,
-            "[BRUTE_FORCE] Redis unavailable during pre-login check for IP ",
+            "[BRUTE_FORCE] Redis unavailable during pre-login for IP ",
             ip,
             ": ",
             tostring(err)
         )
-        return false
+        return nil, err or "Redis unavailable"
     end
 
+    -- 1. Kiểm tra lockout đã được lưu.
     local locked, lock_err = is_ip_locked(ip, red)
 
-    redis_helper.close(red)
-
     if locked == nil then
+        redis_helper.close(red)
+
         ngx.log(
             ngx.ERR,
             "[BRUTE_FORCE] Cannot verify pre-login lockout for IP ",
@@ -658,10 +810,12 @@ function _M.check_prelogin(ctx)
             ": ",
             tostring(lock_err)
         )
-        return false
+        return nil, lock_err or "Cannot verify lockout"
     end
 
     if locked then
+        redis_helper.close(red)
+
         ctx.brute_force = ctx.brute_force or {}
         ctx.brute_force.action = "block_prelogin"
         ctx.brute_force.is_locked = true
@@ -671,6 +825,62 @@ function _M.check_prelogin(ctx)
             "[BRUTE_FORCE] IP ",
             ip,
             " attempted login during lockout"
+        )
+
+        return true
+    end
+
+    -- 2. Kiểm tra counter để phát hiện trường hợp
+    -- counter đã vượt ngưỡng nhưng lockout chưa được lưu.
+    local fail_key = "brute_force:fail:" .. ip
+    local attempts, attempts_err = red:get(fail_key)
+
+    if not attempts then
+        redis_helper.close(red)
+
+        ngx.log(
+            ngx.ERR,
+            "[BRUTE_FORCE] Cannot read failure counter for IP ",
+            ip,
+            ": ",
+            tostring(attempts_err)
+        )
+
+        return nil, attempts_err or "Cannot read failure counter"
+    end
+
+    local attempt_count = 0
+
+    if attempts ~= ngx.null then
+        attempt_count = tonumber(attempts)
+
+        if not attempt_count then
+            redis_helper.close(red)
+
+            ngx.log(
+                ngx.ERR,
+                "[BRUTE_FORCE] Invalid failure counter for IP ",
+                ip
+            )
+
+            return nil, "Invalid failure counter"
+        end
+    end
+
+    redis_helper.close(red)
+
+    if attempt_count >= cfg.max_attempts then
+        ctx.brute_force = ctx.brute_force or {}
+        ctx.brute_force.action = "block_prelogin"
+        ctx.brute_force.is_locked = true
+        ctx.brute_force.attempt_count = attempt_count
+
+        ngx.log(
+            ngx.WARN,
+            "[BRUTE_FORCE] IP ",
+            ip,
+            " reached failure threshold during pre-login: ",
+            attempt_count
         )
 
         return true

@@ -46,9 +46,8 @@ def health_check(request):
           if val != "1":
                healthy = False
      except Exception as e:
-          # Cache down có thể chỉ cảnh báo chứ không làm sập hệ thống (tuỳ logic của bạn)
           checks["cache"] = f"error: {type(e).__name__}"
-          checks["cache_warn"] = True
+          healthy = False
 
      status_code = 200 if healthy else 503
      return JsonResponse(

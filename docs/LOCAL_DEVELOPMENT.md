@@ -68,7 +68,7 @@ Lệnh trên **giữ lại** MySQL và volume logs. Để xóa toàn bộ dữ l
 ## Những việc chưa được giải quyết bởi gói 1.1
 
 - Chưa sửa authorization cho các Django admin views, identity header spoofing, rate limiting, IP blacklist hoặc risk policies. Đây là các hạng mục 1.2–1.7.
-- `nginx.conf` vẫn có hostname `dacn3.duckdns.org` cho production và file cert tự ký chỉ được dùng ở local; không dùng để đánh giá TLS production.
+- `nginx.conf` vẫn có hostname `asg-datn.duckdns.org` cho production và file cert tự ký chỉ được dùng ở local; không dùng để đánh giá TLS production.
 - `settings.py` production hiện có cấu hình TLS MySQL cần kiểm tra lại; `settings_local.py` sửa riêng đường kết nối MySQL local bằng `ssl_mode=DISABLED`.
 - Không có điều kiện chạy Docker daemon trong môi trường chuẩn bị gói file này, vì vậy **chưa xác nhận hệ thống chạy thành công bằng integration test**. Hãy đối chiếu `ps` và logs sau khi chạy.
 - Nếu Docker báo không bind được 80/443, cần giải phóng port hoặc điều chỉnh Nginx redirect phù hợp khi đổi port host.
