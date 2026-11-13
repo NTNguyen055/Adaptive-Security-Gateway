@@ -178,6 +178,17 @@ urlpatterns = [
 
 # ── STATIC & MEDIA FILES ──────────────────────────────────────
 if settings.DEBUG:
-     from django.conf.urls.static import static
-     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+    from django.conf.urls.static import static
+
+    # Static files remain local in development.
+    urlpatterns += static(
+        settings.STATIC_URL,
+        document_root=settings.STATIC_ROOT,
+    )
+
+    # Only serve media from local filesystem when S3 is disabled.
+    if not settings.USE_S3:
+        urlpatterns += static(
+            settings.MEDIA_URL,
+            document_root=settings.MEDIA_ROOT,
+        )

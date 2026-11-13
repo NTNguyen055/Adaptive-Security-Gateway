@@ -228,34 +228,56 @@ SESSION_CACHE_ALIAS = "default"
 # ============================================================
 # AWS S3 & STORAGE BACKENDS
 # ============================================================
-USE_S3 = get_env("USE_S3", "False") == "True"
+USE_S3 = get_env("USE_S3", "False").lower() in ("true", "1", "yes")
+
+# Static assets ALWAYS use WhiteNoise, never S3.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+# WhiteNoise must be available in both local and production environments.
+# Insert it immediately after SecurityMiddleware, without duplicates.
+WHITENOISE_MIDDLEWARE = "whitenoise.middleware.WhiteNoiseMiddleware"
+
+if WHITENOISE_MIDDLEWARE not in MIDDLEWARE:
+    MIDDLEWARE.insert(1, WHITENOISE_MIDDLEWARE)
 
 if USE_S3:
-    AWS_STORAGE_BUCKET_NAME = get_env("AWS_STORAGE_BUCKET_NAME", required=True)
-    AWS_S3_REGION_NAME      = get_env("AWS_S3_REGION_NAME", "ap-northeast-1")
-    AWS_DEFAULT_ACL         = None
-    AWS_QUERYSTRING_AUTH    = False
-    AWS_S3_FILE_OVERWRITE   = False
-    AWS_S3_CUSTOM_DOMAIN    = f"{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com"
-    AWS_S3_OBJECT_PARAMETERS = {"CacheControl": "max-age=86400"}
-    AWS_S3_URL_PROTOCOL     = "https:"
+    AWS_STORAGE_BUCKET_NAME = get_env(
+        "AWS_STORAGE_BUCKET_NAME",
+        required=True,
+    )
+    AWS_S3_REGION_NAME = get_env(
+        "AWS_S3_REGION_NAME",
+        "ap-southeast-1",
+    )
 
-    STORAGES = {
-        "default":     {"BACKEND": "storages.backends.s3boto3.S3Boto3Storage", "OPTIONS": {"location": "media"}},
-        "staticfiles": {"BACKEND": "storages.backends.s3boto3.S3StaticStorage", "OPTIONS": {"location": "static"}},
+    # Private bucket: objects are accessed through temporary signed URLs.
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_QUERYSTRING_EXPIRE = 900
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_SIGNATURE_VERSION = "s3v4"
+    AWS_S3_USE_SSL = True
+    AWS_S3_VERIFY = True
+
+    # Preserve existing ImageField paths, e.g. media/profile_pic/avatar.png.
+    # Do not prepend another "media/" directory.
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "location": "",
+            "file_overwrite": False,
+            "default_acl": None,
+            "querystring_auth": True,
+            "querystring_expire": 900,
+        },
     }
-
-    STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
-    MEDIA_URL  = f"https://{AWS_S3_CUSTOM_DOMAIN}/media/"
-
-else:
-    # Môi trường dev (hoặc production không dùng S3)
-    STORAGES = {
-        "default":     {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
-    }
-    # Chèn WhiteNoiseMiddleware vào đúng vị trí số 1 (sau SecurityMiddleware)
-    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 # ============================================================
 # LOGGING
