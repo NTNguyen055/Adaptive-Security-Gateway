@@ -22,8 +22,5 @@ if USE_S3:
 DATABASES["default"]["OPTIONS"].pop("ssl", None)
 DATABASES["default"]["OPTIONS"]["ssl_mode"] = "DISABLED"
 
-# Gunicorn does not serve static assets. WhiteNoise is already in requirements.
-MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
-
 # All authentication cookies remain Secure: open the lab site with HTTPS.
 DEBUG = False
