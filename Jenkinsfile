@@ -16,7 +16,6 @@ pipeline {
     environment {
         APP_IMAGE = 'ntnguyen055/adaptive-security-app'
         GW_IMAGE  = 'ntnguyen055/adaptive-security-gateway'
-        IMAGE_TAG = "v${BUILD_NUMBER}"
         DOCKER_BUILDKIT = '1'
         COMPOSE_DOCKER_CLI_BUILD = '1'
 
@@ -34,7 +33,33 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    // Initialize mutable GitHub Check states.
+                    env.ASG_CHECK_CHECKOUT = 'SKIPPED'
+                    env.ASG_CHECK_PREBUILD = 'SKIPPED'
+                    env.ASG_CHECK_BUILD = 'SKIPPED'
+                    env.ASG_CHECK_UNIT = 'SKIPPED'
+                    env.ASG_CHECK_SMOKE = 'SKIPPED'
+                    env.ASG_CHECK_RELEASE = 'SKIPPED'
+                    env.ASG_CHECK_DOCKER = 'SKIPPED'
+                    env.ASG_CHECK_DEPLOY = 'SKIPPED'
+
+                    env.SOURCE_COMMIT = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    def branchSlug = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'unknown')
+                        .replaceAll('[^A-Za-z0-9_.-]', '-')
+                        .take(30)
+
+                    env.IMAGE_TAG = "ci-${branchSlug}-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(12)}"
+
+                    def buildSlug = env.BUILD_TAG.replaceAll('[^A-Za-z0-9_.-]', '-')
+                    env.DOCKER_CONFIG = "${pwd(tmp: true)}/docker-${buildSlug}"
+
+                    sh 'mkdir -p "$DOCKER_CONFIG"'
+
+                    echo "Docker image tag: ${env.IMAGE_TAG}"
                 }
                 sh '''
                     set -eu
@@ -42,6 +67,20 @@ pipeline {
                     echo "Source commit: ${SOURCE_COMMIT}"
                     git log -1 --pretty='Commit: %s'
                 '''
+            }
+            post {
+                success {
+                    script { env.ASG_CHECK_CHECKOUT = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_CHECKOUT = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_CHECKOUT = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_CHECKOUT = 'CANCELED' }
+                }
             }
         }
 
@@ -68,6 +107,20 @@ pipeline {
                     echo 'Pre-build checks PASS'
                 '''
             }
+            post {
+                success {
+                    script { env.ASG_CHECK_PREBUILD = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_PREBUILD = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_PREBUILD = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_PREBUILD = 'CANCELED' }
+                }
+            }
         }
 
         stage('Build Images') {
@@ -93,6 +146,20 @@ pipeline {
                         -f nginx/Dockerfile ./nginx
                 '''
             }
+            post {
+                success {
+                    script { env.ASG_CHECK_BUILD = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_BUILD = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_BUILD = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_BUILD = 'CANCELED' }
+                }
+            }
         }
 
         stage('Unit Regression') {
@@ -109,6 +176,20 @@ pipeline {
                         exit 1
                     fi
                 '''
+            }
+            post {
+                success {
+                    script { env.ASG_CHECK_UNIT = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_UNIT = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_UNIT = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_UNIT = 'CANCELED' }
+                }
             }
         }
 
@@ -132,6 +213,20 @@ pipeline {
                     "
                 '''
             }
+            post {
+                success {
+                    script { env.ASG_CHECK_SMOKE = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_SMOKE = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_SMOKE = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_SMOKE = 'CANCELED' }
+                }
+            }
         }
 
         stage('Verify Release Commit') {
@@ -152,6 +247,20 @@ pipeline {
                     fi
                     echo "Release commit verified: $SOURCE_COMMIT"
                 '''
+            }
+            post {
+                success {
+                    script { env.ASG_CHECK_RELEASE = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_RELEASE = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_RELEASE = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_RELEASE = 'CANCELED' }
+                }
             }
         }
 
@@ -178,6 +287,20 @@ pipeline {
                         docker push "${GW_IMAGE}:latest"
                         docker push "${APP_IMAGE}:latest"
                     '''
+                }
+            }
+            post {
+                success {
+                    script { env.ASG_CHECK_DOCKER = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_DOCKER = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_DOCKER = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_DOCKER = 'CANCELED' }
                 }
             }
         }
@@ -244,6 +367,11 @@ for spec in "${APP_IMAGE}:${IMAGE_TAG}" "${GW_IMAGE}:${IMAGE_TAG}"; do
     LABEL_SHA=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$spec")
     [ "$LABEL_SHA" = "$SOURCE_COMMIT" ] || fail "Image source label mismatch: $spec"
 done
+
+log '[4.1] Activating verified release images...'
+
+docker tag "${APP_IMAGE}:${IMAGE_TAG}" "${APP_IMAGE}:latest"
+docker tag "${GW_IMAGE}:${IMAGE_TAG}" "${GW_IMAGE}:latest"
 
 do_rollback() {
     log 'Rolling back previous code/images...'
@@ -377,6 +505,18 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
                 }
             }
             post {
+                success {
+                    script { env.ASG_CHECK_DEPLOY = 'SUCCESS' }
+                }
+                failure {
+                    script { env.ASG_CHECK_DEPLOY = 'FAILURE' }
+                }
+                unstable {
+                    script { env.ASG_CHECK_DEPLOY = 'NEUTRAL' }
+                }
+                aborted {
+                    script { env.ASG_CHECK_DEPLOY = 'CANCELED' }
+                }
                 always { sh 'rm -f deploy.sh || true' }
             }
         }
@@ -384,9 +524,79 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
 
     post {
         always {
+            script {
+                def checks = [
+                    [
+                        name: 'ASG CI / Checkout',
+                        result: env.ASG_CHECK_CHECKOUT
+                    ],
+                    [
+                        name: 'ASG CI / Pre-build Checks',
+                        result: env.ASG_CHECK_PREBUILD
+                    ],
+                    [
+                        name: 'ASG CI / Build Images',
+                        result: env.ASG_CHECK_BUILD
+                    ],
+                    [
+                        name: 'ASG CI / Unit Regression',
+                        result: env.ASG_CHECK_UNIT
+                    ],
+                    [
+                        name: 'ASG CI / Smoke Test',
+                        result: env.ASG_CHECK_SMOKE
+                    ],
+                    [
+                        name: 'ASG CI / Verify Release Commit',
+                        result: env.ASG_CHECK_RELEASE
+                    ],
+                    [
+                        name: 'ASG CI / DockerHub Publish',
+                        result: env.ASG_CHECK_DOCKER
+                    ],
+                    [
+                        name: 'ASG CI / AWS Deploy',
+                        result: env.ASG_CHECK_DEPLOY
+                    ]
+                ]
+
+                checks.each { check ->
+                    def result = check.result ?: 'SKIPPED'
+
+                    def summary = result == 'SKIPPED'
+                        ? 'This stage was not executed.'
+                        : "Stage result: ${result}"
+
+                    try {
+                        publishChecks(
+                            name: check.name,
+                            status: 'COMPLETED',
+                            conclusion: result,
+                            title: "${check.name}: ${result}",
+                            summary: summary,
+                            text: """
+            Branch: ${env.BRANCH_NAME ?: 'unknown'}
+
+            Commit: ${env.SOURCE_COMMIT ?: 'not available'}
+
+            Jenkins Build: ${env.BUILD_URL}
+            """,
+                            detailsURL: env.BUILD_URL
+                        )
+                    } catch (Exception e) {
+                        echo "WARNING: Could not publish ${check.name}: ${e.message}"
+                    }
+                }
+            }
             archiveArtifacts artifacts: 'ci-unit.log', allowEmptyArchive: true
             sh '''
-                docker logout >/dev/null 2>&1 || true
+                set -eu
+
+                if [ -n "${DOCKER_CONFIG:-}" ]; then
+                    docker logout >/dev/null 2>&1 || true
+                    rm -rf "$DOCKER_CONFIG"
+                fi
+
                 if [ -n "${IMAGE_TAG:-}" ]; then
                     docker rmi "${APP_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
                     docker rmi "${GW_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
