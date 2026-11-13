@@ -16,7 +16,6 @@ pipeline {
     environment {
         APP_IMAGE = 'ntnguyen055/adaptive-security-app'
         GW_IMAGE  = 'ntnguyen055/adaptive-security-gateway'
-        IMAGE_TAG = 'pending'
         DOCKER_BUILDKIT = '1'
         COMPOSE_DOCKER_CLI_BUILD = '1'
 
@@ -27,15 +26,6 @@ pipeline {
         HEALTH_DOMAIN = 'asg-datn.duckdns.org'
         HEALTH_RETRIES = '12'
         COMPOSE_TIMEOUT = '120'
-
-        ASG_CHECK_CHECKOUT = 'SKIPPED'
-        ASG_CHECK_PREBUILD = 'SKIPPED'
-        ASG_CHECK_BUILD = 'SKIPPED'
-        ASG_CHECK_UNIT = 'SKIPPED'
-        ASG_CHECK_SMOKE = 'SKIPPED'
-        ASG_CHECK_RELEASE = 'SKIPPED'
-        ASG_CHECK_DOCKER = 'SKIPPED'
-        ASG_CHECK_DEPLOY = 'SKIPPED'
     }
 
     stages {
@@ -43,7 +33,21 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    // Initialize mutable GitHub Check states.
+                    env.ASG_CHECK_CHECKOUT = 'SKIPPED'
+                    env.ASG_CHECK_PREBUILD = 'SKIPPED'
+                    env.ASG_CHECK_BUILD = 'SKIPPED'
+                    env.ASG_CHECK_UNIT = 'SKIPPED'
+                    env.ASG_CHECK_SMOKE = 'SKIPPED'
+                    env.ASG_CHECK_RELEASE = 'SKIPPED'
+                    env.ASG_CHECK_DOCKER = 'SKIPPED'
+                    env.ASG_CHECK_DEPLOY = 'SKIPPED'
+
+                    env.SOURCE_COMMIT = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
                     def branchSlug = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'unknown')
                         .replaceAll('[^A-Za-z0-9_.-]', '-')
                         .take(30)
@@ -593,7 +597,7 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
                     rm -rf "$DOCKER_CONFIG"
                 fi
 
-                if [ -n "${IMAGE_TAG:-}" ] && [ "$IMAGE_TAG" != "pending" ]; then
+                if [ -n "${IMAGE_TAG:-}" ]; then
                     docker rmi "${APP_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
                     docker rmi "${GW_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
                 fi
