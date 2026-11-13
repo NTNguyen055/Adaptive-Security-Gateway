@@ -2,6 +2,20 @@
 .git
 .gitignore
 
+# Secrets and credentials
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
 # Python/Django
 __pycache__/
 *.py[cod]
@@ -10,6 +24,11 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # IDE/OS
 .idea/

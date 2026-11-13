@@ -115,7 +115,6 @@ local function check(value, ctx, source)
         local ip = (ctx.security and ctx.security.client_ip) or ngx.var.remote_addr
         ngx.log(ngx.WARN, "[WAF][SQLi] ip=", ip, " source=", (source or "unknown"), " val=", v:sub(1, 120))
         
-        if metric_blocked then metric_blocked:inc(1, {"waf_sqli"}) end
         is_attack = true
     end
 
@@ -129,7 +128,6 @@ local function check(value, ctx, source)
         local ip = (ctx.security and ctx.security.client_ip) or ngx.var.remote_addr
         ngx.log(ngx.WARN, "[WAF][XSS] ip=", ip, " source=", (source or "unknown"), " val=", v:sub(1, 120))
         
-        if metric_blocked then metric_blocked:inc(1, {"waf_xss"}) end
         is_attack = true
     end
 

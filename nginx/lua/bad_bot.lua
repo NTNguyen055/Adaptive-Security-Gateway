@@ -110,8 +110,8 @@ function _M.run(ctx)
     -- 2. real_ip module
     -- 3. remote_addr
     local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
                or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
 
     -- Lấy User-Agent từ HTTP Header.
     local ua = ngx.var.http_user_agent
@@ -366,12 +366,7 @@ function _M.run(ctx)
             )
         end
 
-        if metric_blocked then
-            metric_blocked:inc(
-                1,
-                {"bad_bot_scanner"}
-            )
-        end
+
 
         return
     end
@@ -417,12 +412,7 @@ function _M.run(ctx)
             )
         end
 
-        if metric_blocked then
-            metric_blocked:inc(
-                1,
-                {"bad_bot_headless"}
-            )
-        end
+
 
         return
     end

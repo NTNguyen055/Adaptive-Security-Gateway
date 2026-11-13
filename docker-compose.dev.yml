@@ -1,0 +1,181 @@
+# Standalone local development stack; does not merge with docker-compose.yml.
+# Local-only ports. Do not use this file for an Internet-exposed deployment.
+name: adaptive-security-local
+
+services:
+  db:
+    image: mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:?Run python scripts/init-local-env.py first}
+      MYSQL_USER: ${DB_USER:?DB_USER is required}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - mysql_local_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    networks:
+      - internal
+
+  redis:
+    image: redis@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis_local_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+  app:
+    build:
+      context: ./docappsystem
+      dockerfile: Dockerfile
+    image: adaptive-security-app:local
+    container_name: docapp_django  # nginx.conf currently uses this hostname
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      DJANGO_SETTINGS_MODULE: docappsystem.settings_local
+      APP_ENV: local
+    command: >-
+      sh -c 'python manage.py migrate --noinput &&
+      python manage.py collectstatic --noinput &&
+      gunicorn docappsystem.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers 2
+      --threads 2
+      --timeout 60
+      --access-logfile -
+      --error-logfile -'
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          req=urllib.request.Request('http://127.0.0.1:8000/health/',
+          headers={'Host':'localhost','X-Forwarded-Proto':'https'});
+          urllib.request.urlopen(req, timeout=5)" || exit 1
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 70s
+    networks:
+      - internal
+
+  gateway:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: adaptive-security-gateway:local
+    container_name: openresty_gateway
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+    # No production Let's Encrypt mounts: nginx/Dockerfile provides a
+    # temporary self-signed certificate for local testing only.
+    volumes:
+      - gateway_local_logs:/usr/local/openresty/nginx/logs
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -kfsS --max-time 5 -H 'Host: localhost'
+          https://127.0.0.1/health/ > /dev/null || exit 1
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+    networks:
+      - internal
+
+  prometheus:
+    image: prom/prometheus@sha256:3b1d5be5c3eef4f027665ddaa3b1a7de8a58d96a0a6de5dd45629afd267ecaf0
+    profiles: [monitoring]
+    restart: unless-stopped
+    # Stage 1.6 local monitoring: bound historical TSDB growth.
+    # Size bound concerns blocks; WAL/head may temporarily exceed it.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=512MB
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_local_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana@sha256:b5b59bfc7561634c2d7b136c4543d702ebcc94a3da477f21ff26f89ffd4214fa
+    profiles: [monitoring]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_local_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+volumes:
+  mysql_local_data:
+  redis_local_data:
+  gateway_local_logs:
+  prometheus_local_data:
+  grafana_local_data:
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24  # Matches the existing OpenResty trusted subnet configuration
