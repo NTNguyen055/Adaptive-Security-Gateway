@@ -17,6 +17,9 @@ services:
     env_file:
       - /home/ubuntu/appointment-web/.env
 
+    volumes:
+      - /home/ubuntu/appointment-web/certs/rds-global-bundle.pem:/etc/ssl/certs/rds-global-bundle.pem:ro
+
     depends_on:
       redis:
         condition: service_healthy
@@ -63,7 +66,6 @@ services:
 
     networks:
       - internal
-
 
   # REDIS — Security state persistence
   redis:
