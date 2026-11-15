@@ -156,9 +156,15 @@ DATABASES = {
         "PORT":         get_env("DB_PORT",     "3306"),
         "CONN_MAX_AGE": 60,
         "OPTIONS": {
-            "charset":         "utf8mb4",
+            "charset": "utf8mb4",
             "connect_timeout": 5,
-            "ssl": {"ssl-mode": "REQUIRED"},
+            "ssl_mode": "VERIFY_IDENTITY",
+            "ssl": {
+                "ca": get_env(
+                    "DB_SSL_CA",
+                    "/etc/ssl/certs/rds-global-bundle.pem",
+                ),
+            },
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'",
         },
     }
