@@ -44,6 +44,7 @@ pipeline {
                     env.ASG_CHECK_MIGRATION = 'SKIPPED'
                     env.ASG_CHECK_DEPLOY = 'SKIPPED'
                     env.ASG_CHECK_LATEST = 'SKIPPED'
+                    env.ASG_CHECK_DEV_DOCKER = 'SKIPPED'
 
                     env.SOURCE_COMMIT = sh(
                         script: 'git rev-parse HEAD',
@@ -55,6 +56,7 @@ pipeline {
                         .take(30)
 
                     env.IMAGE_TAG = "ci-${branchSlug}-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(12)}"
+                    env.DEV_IMAGE_TAG = "dev-${env.SOURCE_COMMIT.take(12)}"
 
                     def buildSlug = env.BUILD_TAG.replaceAll('[^A-Za-z0-9_.-]', '-')
                     env.DOCKER_CONFIG = "${pwd(tmp: true)}/docker-${buildSlug}"
@@ -228,6 +230,41 @@ pipeline {
                 aborted {
                     script { env.ASG_CHECK_SMOKE = 'CANCELED' }
                 }
+            }
+        }
+
+        stage('Publish Develop Images') {
+            when {
+                expression {
+                    def b = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
+                    return b in ['develop', 'origin/develop', 'refs/heads/develop']
+                }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred-ASG',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        set -eu
+                        printf '%s' "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                        docker tag "${APP_IMAGE}:${IMAGE_TAG}" "${APP_IMAGE}:${DEV_IMAGE_TAG}"
+                        docker tag "${GW_IMAGE}:${IMAGE_TAG}" "${GW_IMAGE}:${DEV_IMAGE_TAG}"
+
+                        docker push "${APP_IMAGE}:${DEV_IMAGE_TAG}"
+                        docker push "${GW_IMAGE}:${DEV_IMAGE_TAG}"
+
+                        echo "Develop Docker Hub images published: ${DEV_IMAGE_TAG}"
+                    '''
+                }
+            }
+            post {
+                success { script { env.ASG_CHECK_DEV_DOCKER = 'SUCCESS' } }
+                failure { script { env.ASG_CHECK_DEV_DOCKER = 'FAILURE' } }
+                unstable { script { env.ASG_CHECK_DEV_DOCKER = 'NEUTRAL' } }
+                aborted { script { env.ASG_CHECK_DEV_DOCKER = 'CANCELED' } }
             }
         }
 
@@ -804,6 +841,10 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
                         result: env.ASG_CHECK_DOCKER
                     ],
                     [
+                        name: 'ASG CI / Develop DockerHub Publish',
+                        result: env.ASG_CHECK_DEV_DOCKER
+                    ],
+                    [
                         name: 'ASG CI / Database Migration',
                         result: env.ASG_CHECK_MIGRATION
                     ],
@@ -857,11 +898,16 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
                 if [ -n "${IMAGE_TAG:-}" ]; then
                     docker rmi "${APP_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
                     docker rmi "${GW_IMAGE}:${IMAGE_TAG}" 2>/dev/null || true
+
+                    if [ -n "${DEV_IMAGE_TAG:-}" ]; then
+                        docker rmi "${APP_IMAGE}:${DEV_IMAGE_TAG}" 2>/dev/null || true
+                        docker rmi "${GW_IMAGE}:${DEV_IMAGE_TAG}" 2>/dev/null || true
+                    fi
                 fi
             '''
         }
         success {
-            echo "Jenkins #${BUILD_NUMBER}: CI passed. Push/Deploy stages run only for main."
+            echo "Jenkins #${BUILD_NUMBER}: CI passed. Develop publishes dev tags. Production stages run only for main."
         }
         failure {
             echo "Jenkins #${BUILD_NUMBER}: FAILED — ${BUILD_URL}console"
