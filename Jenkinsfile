@@ -56,7 +56,14 @@ pipeline {
                         .take(30)
 
                     env.IMAGE_TAG = "ci-${branchSlug}-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(12)}"
-                    env.DEV_IMAGE_TAG = "dev-${env.SOURCE_COMMIT.take(12)}"
+
+                    def currentBranch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
+
+                    env.DEV_IMAGE_TAG = currentBranch in [
+                        'develop',
+                        'origin/develop',
+                        'refs/heads/develop'
+                    ] ? "dev-${env.SOURCE_COMMIT.take(12)}" : ''
 
                     def buildSlug = env.BUILD_TAG.replaceAll('[^A-Za-z0-9_.-]', '-')
                     env.DOCKER_CONFIG = "${pwd(tmp: true)}/docker-${buildSlug}"
