@@ -39,7 +39,7 @@ local PUBLIC_PATHS = {
 -- HÀM NHẬN DIỆN GIAO DIỆN WEB
 -- =============================================================================
 -- Đã dọn dẹp 'logout' ra khỏi regex vì nó đã được match chính xác (Exact match) ở PUBLIC_PATHS
-local WEB_PREFIXES_PATTERN = [[^/(?:static|media|admin|doctor|doctors|user|users|patient|patients|manage|search|view|update|profile|password|base)(?:/|$)]]
+local WEB_PREFIXES_PATTERN = [[^/(?:static|media|sys-admin-panel|admin|doctor|doctors|userbase|user|users|patient|patients|manage|search|view|update|profile|password|base)(?:/|$)]]
 
 local function is_web_route(uri)
     if not uri then return false end
@@ -53,41 +53,46 @@ local INVALID_TTL    = 60    -- Giảm thời gian cache Token lỗi xuống 60s
 -- MAIN
 -- =============================================================================
 function _M.run(ctx)
-    local JWT_SECRET = get_secret()
-    if not JWT_SECRET then return end
+    -- Loại bỏ identity headers do client tự cung cấp.
+    ngx.req.clear_header("X-User-ID")
+    ngx.req.clear_header("X-User-Role")
 
     local uri = ngx.var.uri
-    
-    -- Bỏ qua kiểm tra JWT đối với các endpoint Public (như /login) 
-    -- hoặc các route phục vụ giao diện Web (nơi dùng Cookie/Session thay vì Bearer Token).
+
+    -- Public endpoints và Web routes sử dụng Django Session.
     if PUBLIC_PATHS[uri] or is_web_route(uri) then
         ctx.security = ctx.security or {}
         ctx.security.jwt_public_path = true
         return
     end
 
-    local ip = (ctx.security and ctx.security.client_ip)
-               or ngx.var.realip_remote_addr
-               or ngx.var.remote_addr
+    -- Fail closed khi thiếu JWT secret trên protected routes.
+    local JWT_SECRET = get_secret()
 
-    local auth_header   = ngx.var.http_authorization
-    local cookie_header = ngx.var.http_cookie
+    if not JWT_SECRET then
+        ctx.security = ctx.security or {}
+        ctx.security.block = true
+        ctx.security.jwt_config_error = true
+
+        ngx.log(
+            ngx.ERR,
+            "[JWT] Missing JWT_SECRET_KEY; denying protected request"
+        )
+
+        return
+    end
+
+    local ip = (ctx.security and ctx.security.client_ip)
+               or ngx.var.remote_addr
+               or ngx.var.realip_remote_addr
+
+    local auth_header = ngx.var.http_authorization
 
     ctx.security         = ctx.security or {}
     ctx.security.signals = ctx.security.signals or {}
 
     -- ── MISSING JWT ───────────────────────────────────────────
     if not auth_header then
-        -- Tương thích với Session Cookie của Django
-        -- Cơ chế Hybrid Auth: Nếu API không nhận được JWT, nhưng lại thấy có 
-        -- Cookie sessionid (của web framework như Django/Laravel), hệ thống sẽ nhân nhượng cho đi tiếp.
-        if cookie_header and re_find(cookie_header, [[sessionid=]], "jo") then
-            ctx.security.jwt_missing = true
-            ctx.security.using_session = true
-            -- Ghi log INFO để tiện truy vết audit các luồng dùng Session
-            ngx.log(ngx.INFO, "[JWT] Session fallback ip=", ip, " uri=", uri)
-            return
-        end
 
         ctx.security.jwt_missing = true
         ctx.security.block       = true
@@ -143,15 +148,49 @@ function _M.run(ctx)
     if cache then
         local cached_val = cache:get(token_hash)
         if cached_val == 1 then
-            ctx.security.jwt_valid      = true
-            ctx.security.jwt_from_cache = true
+            local uid = cache:get("jwt_uid:" .. token_hash)
+            local role = cache:get("jwt_role:" .. token_hash)
+            local bound_ip = cache:get("jwt_ip:" .. token_hash)
 
-            local uid_key = "jwt_uid:" .. token_hash
-            local uid = cache:get(uid_key)
-            if uid then
+            -- Chỉ sử dụng cache khi đủ thông tin xác thực.
+            -- Cache thiếu dữ liệu sẽ đi tiếp xuống bước verify JWT.
+            if uid and role and bound_ip then
+
+                -- Không cho phép cache hit bỏ qua replay detection.
+                if bound_ip ~= ip then
+                    ctx.security.jwt_replay = true
+                    ctx.security.block = true
+
+                    table.insert(
+                        ctx.security.signals,
+                        "jwt_replay"
+                    )
+
+                    ngx.log(
+                        ngx.WARN,
+                        "[JWT] Cached token IP mismatch ip=",
+                        ip,
+                        " expected_ip=",
+                        bound_ip
+                    )
+
+                    return
+                end
+
+                -- Khôi phục đầy đủ identity.
                 ngx.req.set_header("X-User-ID", tostring(uid))
+                ngx.req.set_header("X-User-Role", role)
+
+                ctx.identity = {
+                    user_id = uid,
+                    role = role,
+                }
+
+                ctx.security.jwt_valid = true
+                ctx.security.jwt_from_cache = true
+
+                return
             end
-            return
         end
         if cached_val == 2 then
             ctx.security.jwt_invalid = true
@@ -252,6 +291,7 @@ function _M.run(ctx)
         ctx.security.block = true
         ctx.security.risk = math_min((ctx.security.risk or 0) + 80, 100)
         table.insert(ctx.security.signals, "jwt_iat_future")
+        return
     end
 
     -- ── REPLAY DETECTION ─────────────────────────────────────
@@ -274,13 +314,6 @@ function _M.run(ctx)
         end
     end
 
-    -- ── CACHE VALID TOKEN ────────────────────────────────────
-    if cache then
-        local cache_ttl = math.min(ttl, MAX_REPLAY_TTL)
-        cache:set(token_hash, 1, cache_ttl)
-        cache:set("jwt_uid:" .. token_hash, payload.user_id, cache_ttl)
-    end
-
     -- ── FORWARD IDENTITY HEADERS ─────────────────────────────
     -- Backend không cần tự verify JWT nữa. Nginx đẩy luôn thông tin User xuống 
     -- qua Header HTTP. Rất tiện cho kiến trúc Microservices.
@@ -290,6 +323,18 @@ function _M.run(ctx)
     -- Xóa bỏ mọi ký tự lạ (chỉ giữ lại chữ, số, gạch ngang, gạch dưới) 
     -- khỏi trường "role" để đề phòng kỹ thuật HTTP Header Injection nhắm vào Backend.
     local role = tostring(payload.role or "user"):gsub("[^%w_%-]", "")
+
+    -- Cache đầy đủ identity sau khi JWT đã được xác minh.
+    if cache then
+        local cache_ttl = math.min(ttl, MAX_REPLAY_TTL)
+
+        cache:set("jwt_uid:" .. token_hash, payload.user_id, cache_ttl)
+        cache:set("jwt_role:" .. token_hash, role, cache_ttl)
+
+        -- Ghi cờ hợp lệ sau cùng.
+        cache:set(token_hash, 1, cache_ttl)
+    end
+
     ngx.req.set_header("X-User-Role", role)
 
     ctx.identity = {

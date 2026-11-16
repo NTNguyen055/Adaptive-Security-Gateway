@@ -48,3 +48,4 @@ Werkzeug==3.1.5
 whitenoise==6.9.0
 redis==5.0.1
 django-redis==5.4.0
+PyJWT==2.15.1

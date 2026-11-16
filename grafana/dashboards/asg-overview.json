@@ -1,0 +1,547 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Gateway scrape UP",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "1 = Prometheus can scrape the Gateway; 0 = scrape failed.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "up{job=\"adaptive_security_gateway\"}",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Requests / second",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Average RPS over the last 5 minutes.",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum(rate(nginx_http_requests_total[5m]))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "title": "HTTP 403 + 429 / second",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Rejected requests per second (HTTP 403 and 429).",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum(rate(nginx_http_requests_total{status=~\"403|429\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Security decisions / second",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Final Gateway security block/limit decisions, once per request.",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum(rate(nginx_security_decisions_total[5m]))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "title": "HTTP throughput by status",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum by (status) (rate(nginx_http_requests_total[5m]))",
+          "refId": "A",
+          "legendFormat": "HTTP {{status}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "HTTP latency p50 / p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Quantiles computed from the request-duration histogram.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(nginx_http_request_duration_seconds_bucket[5m])))",
+          "refId": "A",
+          "legendFormat": "p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(nginx_http_request_duration_seconds_bucket[5m])))",
+          "refId": "B",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Final security decisions by action",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum by (action) (rate(nginx_security_decisions_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{action}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Top security reasons",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Fixed, normalized reason labels; no client IP labels.",
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "topk(8, sum by (action, reason) (rate(nginx_security_decisions_total[5m])))",
+          "refId": "A",
+          "legendFormat": "{{action}} / {{reason}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Risk score p50 / p90",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "Distribution for requests with a Gateway security context.",
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(nginx_security_risk_score_bucket[5m])))",
+          "refId": "A",
+          "legendFormat": "p50 risk",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(nginx_security_risk_score_bucket[5m])))",
+          "refId": "B",
+          "legendFormat": "p90 risk",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Rejection ratio (403 + 429) / all HTTP",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asg-prometheus"
+      },
+      "description": "HTTP rejection ratio, not a true-positive security accuracy measure.",
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "asg-prometheus"
+          },
+          "expr": "sum(rate(nginx_http_requests_total{status=~\"403|429\"}[5m])) / clamp_min(sum(rate(nginx_http_requests_total[5m])), 0.000001)",
+          "refId": "A",
+          "legendFormat": "rejected / total",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": [
+    "adaptive-security-gateway",
+    "monitoring",
+    "security"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Adaptive Security Gateway — Overview",
+  "uid": "asg-security-overview",
+  "version": 1
+}

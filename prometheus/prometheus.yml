@@ -1,8 +1,15 @@
+# Stage 1.6: internal-only monitoring on the Compose network.
+# Do not add dynamic IP, Host or URI path labels here.
 global:
-  scrape_interval: 5s # Cứ 5s sẽ đi lấy dữ liệu 1 lần
-  evaluation_interval: 5s
+  scrape_interval: 15s
+  evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'adaptive_security_gateway'
+  - job_name: adaptive_security_gateway
+    metrics_path: /metrics
+    scheme: http
+    scrape_interval: 15s
+    scrape_timeout: 5s
     static_configs:
-      - targets: ['openresty_gateway:9145']
+      - targets:
+          - openresty_gateway:9145

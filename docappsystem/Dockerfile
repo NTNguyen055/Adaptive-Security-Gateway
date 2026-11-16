@@ -1,7 +1,7 @@
 # =============================================================================
 # STAGE 1: Builder — compile Python wheels
 # =============================================================================
-FROM python:3.12-slim AS builder
+FROM python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS builder
 
 WORKDIR /build
 
@@ -24,11 +24,10 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
  && pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements.txt
 
-
 # =============================================================================
 # STAGE 2: Runtime — lean image, không có build tools
 # =============================================================================
-FROM python:3.12-slim AS runtime
+FROM python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
 
 WORKDIR /app
 
@@ -47,9 +46,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    # Gunicorn tuning
-    GUNICORN_WORKERS=2 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Gunicorn tuning
+ENV GUNICORN_WORKERS=2 \
     GUNICORN_THREADS=2 \
     GUNICORN_TIMEOUT=60
 
@@ -61,14 +61,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # Copy wheels từ builder và install — không cần build tools
-COPY --from=builder /wheels /wheels
-COPY requirements.txt .
-RUN pip install --no-index --no-cache-dir --find-links=/wheels -r requirements.txt \
- && rm -rf /wheels requirements.txt
-
 # ── SECURITY: non-root user với UID cố định ──────────────────
 # UID cố định 1001 để volume permissions nhất quán giữa các build
-RUN groupadd -g 1001 appgroup \
+COPY --from=builder /wheels /wheels
+COPY requirements.txt .
+
+RUN pip install --no-index --no-cache-dir --find-links=/wheels -r requirements.txt \
+ && rm -rf /wheels requirements.txt \
+ && groupadd -g 1001 appgroup \
  && useradd -u 1001 -g appgroup -m -s /bin/bash appuser
 
 # ── COPY SOURCE CODE ──────────────────────────────────────────
@@ -76,10 +76,12 @@ RUN groupadd -g 1001 appgroup \
 # (.dockerignore sẽ chặn .env, __pycache__, .git lọt vào)
 COPY --chown=appuser:appgroup . .
 
-# ── TẠO THƯ MỤC CẦN THIẾT ────────────────────────────────────
-# static/ phải tồn tại để collectstatic trong settings.py không lỗi
-RUN mkdir -p staticfiles media static \
- && chown -R appuser:appgroup staticfiles media static
+# ── TẠO THƯ MỤC VÀ CLEAN SOURCE ──────────────────────────────
+RUN find /app -type d -name "__pycache__" -prune -exec rm -rf {} + \
+    && find /app -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
+    && mkdir -p /app/staticfiles /app/media /app/static \
+    && chown -R appuser:appgroup \
+        /app/staticfiles /app/media /app/static
 
 # ── SWITCH TO NON-ROOT ────────────────────────────────────────
 USER appuser
@@ -89,13 +91,13 @@ EXPOSE 8000
 
 # ── HEALTHCHECK ──────────────────────────────────────────────
 # Dùng thư viện Python có sẵn (urllib) thay vì cài cURL gây nặng file
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=40s \
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
     CMD python -c \
-        "import urllib.request; \
+        "import os, urllib.request; \
+         host = next((h.strip() for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h.strip()), 'localhost'); \
          req = urllib.request.Request( \
-             'http://localhost:8000/health/', \
-             headers={'X-Forwarded-Proto': 'https', 'Host': 'localhost'} \
+             'http://127.0.0.1:8000/health/', \
+             headers={'X-Forwarded-Proto': 'https', 'Host': host} \
          ); \
-         urllib.request.urlopen(req)" \
+         urllib.request.urlopen(req, timeout=3)" \
     || exit 1
-
