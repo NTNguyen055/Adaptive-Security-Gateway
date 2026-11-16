@@ -4,7 +4,7 @@ services:
   # DJANGO APPLICATION
   # ===========================================================================
   app:
-    image: ntnguyen055/adaptive-security-app:latest
+    image: ntnguyen055/adaptive-security-app:${APP_IMAGE_TAG:-latest}
     container_name: docapp_django
     restart: unless-stopped
 
@@ -36,9 +36,7 @@ services:
       start_period: 60s
 
     command: >
-      sh -c "
-      python manage.py migrate --noinput &&
-      exec gunicorn docappsystem.wsgi:application
+      gunicorn docappsystem.wsgi:application
       --bind 0.0.0.0:8000
       --workers $${GUNICORN_WORKERS:-2}
       --threads $${GUNICORN_THREADS:-2}
@@ -48,7 +46,6 @@ services:
       --access-logfile -
       --error-logfile -
       --log-level info
-      "
 
     deploy:
       resources:
@@ -112,7 +109,7 @@ services:
   # OPENRESTY GATEWAY
   # ===========================================================================
   gateway:
-    image: ntnguyen055/adaptive-security-gateway:latest
+    image: ntnguyen055/adaptive-security-gateway:${GW_IMAGE_TAG:-latest}
     container_name: openresty_gateway
     restart: unless-stopped
 
