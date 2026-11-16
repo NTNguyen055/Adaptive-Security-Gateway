@@ -38,9 +38,9 @@ services:
     command: >
       gunicorn docappsystem.wsgi:application
       --bind 0.0.0.0:8000
-      --workers $${GUNICORN_WORKERS:-2}
-      --threads $${GUNICORN_THREADS:-2}
-      --timeout $${GUNICORN_TIMEOUT:-60}
+      --workers ${GUNICORN_WORKERS:-2}
+      --threads ${GUNICORN_THREADS:-2}
+      --timeout ${GUNICORN_TIMEOUT:-60}
       --max-requests 1000
       --max-requests-jitter 100
       --access-logfile -
