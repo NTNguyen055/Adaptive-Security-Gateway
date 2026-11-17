@@ -86,6 +86,16 @@ RUN find /app -type d -name "__pycache__" -prune -exec rm -rf {} + \
 # ── SWITCH TO NON-ROOT ────────────────────────────────────────
 USER appuser
 
+# ── COLLECT STATIC FILES ──────────────────────────────────────
+RUN SECRET_KEY="ci-static-build-only-not-a-production-secret" \
+    ALLOWED_HOSTS="localhost,127.0.0.1" \
+    DB_NAME="ci_dummy" \
+    DB_USER="ci_dummy" \
+    DB_PASSWORD="ci_dummy" \
+    DB_HOST="127.0.0.1" \
+    DEBUG=False \
+    python manage.py collectstatic --noinput
+
 # ── EXPOSE ───────────────────────────────────────────────────
 EXPOSE 8000
 
