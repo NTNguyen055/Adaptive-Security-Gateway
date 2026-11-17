@@ -86,6 +86,9 @@ RUN find /app -type d -name "__pycache__" -prune -exec rm -rf {} + \
 # ── SWITCH TO NON-ROOT ────────────────────────────────────────
 USER appuser
 
+# ── COLLECT STATIC FILES ──────────────────────────────────────
+RUN python manage.py collectstatic --noinput
+
 # ── EXPOSE ───────────────────────────────────────────────────
 EXPOSE 8000
 
