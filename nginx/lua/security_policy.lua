@@ -10,17 +10,24 @@ local M = {}
 local SOURCE = {
     waf_sqli = "waf_sqli_xss",
     waf_xss = "waf_sqli_xss",
+
     bad_bot_scanner = "bad_bot",
     bad_bot_headless = "bad_bot",
+
     empty_ua = "bad_bot",
     ua_unknown = "bad_bot",
     dev_tool = "bad_bot",
+
     xff_chain_abuse = "xff_guard",
     xff_spoof = "xff_guard",
     xff_malformed = "xff_guard",
     xff_private_chain = "xff_guard",
+    xff_private_client = "xff_guard",
+
     geo_block = "geo_block",
     geo_unknown = "geo_block",
+    geo_private = "geo_block",
+
     jwt_missing = "jwt_auth",
     jwt_malformed = "jwt_auth",
     jwt_invalid = "jwt_auth",
@@ -33,13 +40,18 @@ local SOURCE = {
     jwt_iat_future = "jwt_auth",
     jwt_replay = "jwt_auth",       -- Existing code uses IP mismatch as this signal.
     jwt_ip_changed = "jwt_auth",   -- Future explicit, less accusatory signal.
+
     rate_limit_hard = "rate_limit",
     rate_limit_burst = "rate_limit",
+
     redis_rate_exceeded = "rate_limit_redis",
     redis_rate_warn = "rate_limit_redis",
+
     brute_force_attack = "brute_force_login", -- Legacy signal, to migrate.
     auth_account_backoff = "login_accounting", -- Future V3 signal.
+
     ml_anomaly = "ml_detector",    -- Observe-only until calibrated and verified.
+
     ip_blacklist_manual = "ip_blacklist",
     ip_blacklist_auto = "ip_blacklist",
     ip_blacklist_cached = "ip_blacklist",

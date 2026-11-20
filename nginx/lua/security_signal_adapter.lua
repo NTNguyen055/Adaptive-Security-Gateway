@@ -12,11 +12,21 @@ local SPECS = {
         bad_bot_scanner="bad_bot_scanner", bad_bot_headless="bad_bot_headless",
         empty_ua="empty_ua", ua_unknown="ua_unknown", dev_tool="dev_tool",
     },
+
     xff_guard = {
-        xff_chain_abuse="xff_chain_abuse", xff_spoof="xff_spoof",
-        xff_malformed="xff_malformed", xff_private_chain="xff_private_chain",
+        xff_chain_abuse = "xff_chain_abuse",
+        xff_spoof = "xff_spoof",
+        xff_malformed = "xff_malformed",
+        xff_private_chain = "xff_private_chain",
+        xff_private_client = "xff_private_client",
     },
-    geo_block = {geo_blocked="geo_block", geo_unknown="geo_unknown"},
+
+    geo_block = {
+        geo_blocked = "geo_block",
+        geo_unknown = "geo_unknown",
+        geo_private = "geo_private",
+    },
+
     jwt_auth = {
         jwt_missing="jwt_missing", jwt_malformed="jwt_malformed",
         jwt_invalid="jwt_invalid", jwt_alg_attack="jwt_alg_attack",
@@ -24,16 +34,19 @@ local SPECS = {
         jwt_expired="jwt_expired", jwt_nbf="jwt_nbf",
         jwt_iat_future="jwt_iat_future", jwt_replay="jwt_replay",
     },
+
     rate_limit = {rate_limit_hard="rate_limit_hard", rate_limit_burst="rate_limit_burst"},
     rate_limit_redis = {
         redis_rate_exceeded="redis_rate_exceeded", redis_rate_warn="redis_rate_warn",
     },
+
     ip_blacklist = {ip_blacklisted="ip_blacklist_cached"},
     brute_force_login = {brute_force_attack="brute_force_attack"},
     -- Future producers MUST be instrumented and tested before use.
     login_accounting = {auth_account_backoff="auth_account_backoff"},
     ml_detector = {ml_anomaly="ml_anomaly"},
 }
+
 local ALIASES = {
     ip_blacklist = {
         ip_blacklist_manual=true, ip_blacklist_auto=true,
@@ -41,11 +54,14 @@ local ALIASES = {
     },
     jwt_auth = {jwt_blocked_cache=true, jwt_ip_changed=true},
 }
+
 local MAX_RAW_SIGNALS = 128
 local ALL_KNOWN = {}
+
 for _, flags in pairs(SPECS) do
     for _, id in pairs(flags) do ALL_KNOWN[id] = true end
 end
+
 for _, aliases in pairs(ALIASES) do
     for id in pairs(aliases) do ALL_KNOWN[id] = true end
 end
@@ -83,6 +99,7 @@ function M.new(opts)
     if type(opts) ~= "table" or type(opts.jwt_required) ~= "boolean" then
         return nil, "invalid_route_config"
     end
+
     -- Exact legacy branches differ by Nginx location.
     -- "standard": /, /admin/, /doLogin/
     -- "login": /login/ (does not implement rate-only override)
@@ -92,6 +109,7 @@ function M.new(opts)
         and route_mode ~= "assets" then
         return nil, "invalid_route_mode"
     end
+
     local required = opts.required_modules or {}
     if type(required) ~= "table" then return nil, "invalid_required_modules" end
     for name, enabled in pairs(required) do
@@ -99,6 +117,7 @@ function M.new(opts)
             return nil, "invalid_required_module"
         end
     end
+
     return {
         jwt_required = opts.jwt_required,
         route_mode = route_mode,
@@ -116,19 +135,26 @@ function M.begin_step(trace, module, ctx)
         or type(ctx.security) ~= "table" or not SPECS[module] then
         return nil, "invalid_observation"
     end
+
     if trace.pending or trace.seen[module] then
         return nil, "duplicate_or_nested_module"
     end
+
     local count = array_size(ctx.security.signals)
+
     if not count then return nil, "invalid_legacy_signals" end
+
     local previous = {}
+
     for flag in pairs(SPECS[module]) do
         previous[flag] = ctx.security[flag] == true
     end
+
     local step = {
         module=module, previous=previous, signal_count=count,
         block_before=ctx.security.block == true,
     }
+
     trace.pending = step
     return step
 end
@@ -140,9 +166,11 @@ function M.end_step(trace, step, ctx, successful)
         or type(ctx.security) ~= "table" or type(successful) ~= "boolean" then
         return nil, "invalid_observation_end"
     end
+
     trace.pending = nil
     local module = step.module
     trace.seen[module] = true
+
     if not successful then
         -- A crashing module may already have set block=true before raising.
         -- Never silently convert that partial deny to an allow verdict.
@@ -151,13 +179,17 @@ function M.end_step(trace, step, ctx, successful)
             and module ~= "rate_limit" and module ~= "rate_limit_redis" then
             trace.detector_blocked = true
         end
+
         mark_error(trace, module, "module_crash")
+
         if trace.required[module] then trace.required_control_failed = true end
+
         return true
     end
 
     local security = ctx.security
     local count = array_size(security.signals)
+
     if not count or count < step.signal_count then
         mark_error(trace, module, "invalid_legacy_signals")
         trace.required_control_failed = true
@@ -297,14 +329,19 @@ function M.finish(trace, ctx)
         legacy_blocked=trace.detector_blocked,
         legacy_rate_only=security.rate_only_limited == true,
     }
+
     local result, err = policy.evaluate(input)
+
     if not result then return nil, err end
+
     local old_action, old_status = legacy_action(security, trace.route_mode)
     return {
         policy=result,
         legacy_action=old_action,
         legacy_status=old_status,
         status_diff=(result.http_status ~= old_status),
+        action_diff=(result.action ~= old_action),
+        unmapped_decision=(old_status ~= nil and (#trace.signals == 0)),
         errors=trace.errors,
         signals=trace.signals,
         input=input,

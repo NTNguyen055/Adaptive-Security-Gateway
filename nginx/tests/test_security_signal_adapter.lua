@@ -76,6 +76,36 @@ scenario("A2 future account backoff",nil,{{module="login_accounting",mutate=emit
 scenario("A2 future ML anomaly observe",nil,{{module="ml_detector",mutate=emit("ml_anomaly","ml_anomaly",false)}},"OBSERVE",nil)
 scenario("A2 context-only Redis degraded",nil,{{module="rate_limit_redis",mutate=function(s) s.redis_rl_fail=true end}},"ALLOW",nil)
 
+local private_report = scenario(
+    "A2 Docker private network signals",
+    nil,
+    {
+        {
+            module = "xff_guard",
+            mutate = emit(
+                "xff_private_client",
+                "xff_private_client",
+                false
+            )
+        },
+        {
+            module = "geo_block",
+            mutate = emit(
+                "geo_private",
+                "geo_private",
+                false
+            )
+        }
+    },
+    "OBSERVE",
+    nil
+)
+
+yes(
+    "A2 private network signals recognized without errors",
+    #private_report.errors == 0
+)
+
 scenario("A2 partial block followed by module crash stays denied",nil,
     {{module="bad_bot",success=false,mutate=function(s) s.block=true end}},
     "BLOCK_REQUEST",403,"unmapped_detector_block")
@@ -158,5 +188,13 @@ trace=assert(adapter.new({jwt_required=false}))
 ctx={security={signals={},risk=100,block=true}}
 report=assert(adapter.finish(trace,ctx))
 yes("A2 out-of-band block not falsely attributed to detector",report.status_diff and report.policy.action=="OBSERVE")
+
+local cmp=assert(adapter.new({jwt_required=false}))
+local rep=assert(adapter.finish(cmp,{security={signals={},risk=100,risk_action="block"}}))
+yes("A2 explicit action_diff on risk-only block",rep.action_diff==true)
+yes("A2 explicit unmapped_decision on risk-only block",rep.unmapped_decision==true)
+local clean=assert(adapter.new({jwt_required=false}))
+rep=assert(adapter.finish(clean,{security={signals={},risk=0}}))
+yes("A2 action_diff false for clean",rep.action_diff==false)
 
 print(string.format("%d security signal adapter contract tests PASS",total))

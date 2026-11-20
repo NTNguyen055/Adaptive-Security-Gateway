@@ -46,6 +46,10 @@ local function is_web_route(uri)
     return re_find(uri, WEB_PREFIXES_PATTERN, "ijo") ~= nil
 end
 
+function _M.requires_jwt(uri)
+    return not (PUBLIC_PATHS[uri] or is_web_route(uri))
+end
+
 local MAX_REPLAY_TTL = 3600  -- 1 giờ
 local INVALID_TTL    = 60    -- Giảm thời gian cache Token lỗi xuống 60s để tiết kiệm RAM
 
@@ -60,7 +64,7 @@ function _M.run(ctx)
     local uri = ngx.var.uri
 
     -- Public endpoints và Web routes sử dụng Django Session.
-    if PUBLIC_PATHS[uri] or is_web_route(uri) then
+    if not _M.requires_jwt(uri) then
         ctx.security = ctx.security or {}
         ctx.security.jwt_public_path = true
         return
