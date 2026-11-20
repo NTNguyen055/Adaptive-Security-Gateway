@@ -40,6 +40,9 @@ local SOURCE = {
     brute_force_attack = "brute_force_login", -- Legacy signal, to migrate.
     auth_account_backoff = "login_accounting", -- Future V3 signal.
     ml_anomaly = "ml_detector",    -- Observe-only until calibrated and verified.
+    ip_blacklist_manual = "ip_blacklist",
+    ip_blacklist_auto = "ip_blacklist",
+    ip_blacklist_cached = "ip_blacklist",
 }
 
 local function decision(action, status, scope, reason)
@@ -67,50 +70,91 @@ local AUTH_ORDER = {
 }
 local BLOCK_ORDER = {
     "waf_sqli", "waf_xss", "xff_chain_abuse", "geo_block",
-    "bad_bot_scanner", "brute_force_attack",
+    "bad_bot_scanner", "brute_force_attack", "ip_blacklist_manual",
+    "ip_blacklist_auto", "ip_blacklist_cached",
 }
 local LIMIT_ORDER = {
     "rate_limit_hard", "rate_limit_burst", "redis_rate_exceeded",
     "bad_bot_headless",
 }
 
--- Input:
---   {
---      signals = {{id='waf_sqli', source='waf_sqli_xss'}, ...},
---      required_control_failed = false,
---      ip_ban = {active=true, verified=true, origin='manual'|'automatic'},
---      jwt_required = false,
---      jwt_status = "verified"|"missing"|"invalid"|"ip_changed"|"error",
---      account_restricted = false,
---      risk_score = 0..100, -- telemetry only; NEVER a ban authorization.
---   }
--- The caller MUST treat nil,error as a security-control failure, not ALLOW.
-function M.evaluate(input)
-    if type(input) ~= "table" then return nil, "invalid_input" end
-    local signals = input.signals or {}
+-- Input is produced by a trusted in-process adapter; source strings are NOT
+-- cryptographic attestations. Never pass HTTP headers or client JSON into it.
+-- The caller MUST handle (nil, error) as UNAVAILABLE, never as ALLOW.
+local MAX_SIGNALS = 64
+local MAX_NAME_LENGTH = 64
+local function valid_name(value)
+    return type(value) == "string" and #value > 0
+        and #value <= MAX_NAME_LENGTH
+        and value:match("^[a-z][a-z0-9_]*$") ~= nil
+end
+
+local function valid_bool(value)
+    return value == nil or type(value) == "boolean"
+end
+
+local function validate_signals(signals)
     if type(signals) ~= "table" then return nil, "invalid_signals" end
-    if input.risk_score ~= nil then
-        local score = input.risk_score
-        if type(score) ~= "number" or score ~= score or score < 0 or score > 100 then
-            return nil, "invalid_risk_score"
+
+    local count = 0
+    local highest = 0
+    -- pairs() catches sparse, mixed-key or map-style tables that ipairs()
+    -- would silently skip. Bound before parsing to limit per-request CPU.
+    for key in pairs(signals) do
+        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+            return nil, "invalid_signal_array"
         end
+        count = count + 1
+        if count > MAX_SIGNALS then return nil, "too_many_signals" end
+        if key > highest then highest = key end
     end
+    if highest ~= count then return nil, "invalid_signal_array" end
 
     local present = {}
-    local has_any_signal = false
-    for i, event in ipairs(signals) do
-        if type(event) ~= "table" or type(event.id) ~= "string"
-            or type(event.source) ~= "string" then
+    for i = 1, count do
+        local event = signals[i]
+        if type(event) ~= "table" or not valid_name(event.id)
+            or not valid_name(event.source) then
             return nil, "invalid_signal_at_" .. tostring(i)
         end
         local expected = SOURCE[event.id]
         if expected and event.source ~= expected then
             return nil, "invalid_signal_source:" .. event.id
         end
-        -- Unknown signals are observable only; never silently gain enforcement.
+        -- Unknown signals may be logged, but cannot activate enforcement.
         present[event.id] = true
-        has_any_signal = true
     end
+    return present, count
+end
+
+function M.evaluate(input)
+    if type(input) ~= "table" then return nil, "invalid_input" end
+    if not valid_bool(input.required_control_failed)
+        or not valid_bool(input.jwt_required)
+        or not valid_bool(input.account_restricted)
+        or not valid_bool(input.legacy_blocked)
+        or not valid_bool(input.legacy_rate_only) then
+        return nil, "invalid_boolean_field"
+    end
+    if input.jwt_status ~= nil
+        and input.jwt_status ~= "verified"
+        and input.jwt_status ~= "missing"
+        and input.jwt_status ~= "invalid"
+        and input.jwt_status ~= "ip_changed"
+        and input.jwt_status ~= "error" then
+        return nil, "invalid_jwt_status"
+    end
+    if input.risk_score ~= nil then
+        local score = input.risk_score
+        if type(score) ~= "number" or score ~= score or score < 0
+            or score > 100 then
+            return nil, "invalid_risk_score"
+        end
+    end
+
+    local present, count_or_error = validate_signals(input.signals or {})
+    if not present then return nil, count_or_error end
+    local has_any_signal = count_or_error > 0
 
     if input.required_control_failed == true then
         return decision("UNAVAILABLE", 503, "request", "required_security_control_failed")
@@ -136,10 +180,6 @@ function M.evaluate(input)
         if status == nil or status == "error" then
             return decision("UNAVAILABLE", 503, "request", "jwt_verification_unavailable")
         end
-        if status ~= "verified" and status ~= "missing"
-            and status ~= "invalid" and status ~= "ip_changed" then
-            return nil, "invalid_jwt_status"
-        end
         local jwt_reason = first_present(present, AUTH_ORDER)
         if jwt_reason or status == "missing" or status == "invalid" then
             return decision("BLOCK_REQUEST", 403, "request", jwt_reason or "jwt_denied")
@@ -150,16 +190,32 @@ function M.evaluate(input)
         end
     end
 
+    -- Auth denial is mandatory whenever the trusted JWT detector reported it,
+    -- even if the route configuration says JWT is not normally required.
+    local auth_reason = first_present(present, AUTH_ORDER)
+    if auth_reason then
+        return decision("BLOCK_REQUEST", 403, "request", auth_reason)
+    end
+    if present.jwt_replay or present.jwt_ip_changed then
+        return decision("REAUTH_SESSION", 401, "session", "jwt_ip_binding_changed")
+    end
+
     local attack_reason = first_present(present, BLOCK_ORDER)
     if attack_reason then
         return decision("BLOCK_REQUEST", 403, "request", attack_reason)
+    end
+
+    -- Adapter only marks legacy_blocked for NON-rate detector denials.
+    -- It is never safe to downgrade an otherwise-unmapped security block.
+    local limit_reason = first_present(present, LIMIT_ORDER)
+    if input.legacy_blocked == true then
+        return decision("BLOCK_REQUEST", 403, "request", "unmapped_detector_block")
     end
 
     if input.account_restricted == true or present.auth_account_backoff then
         return decision("ACCOUNT_RESTRICT", 429, "account", "auth_account_backoff")
     end
 
-    local limit_reason = first_present(present, LIMIT_ORDER)
     if limit_reason then
         return decision("THROTTLE", 429, "request", limit_reason)
     end

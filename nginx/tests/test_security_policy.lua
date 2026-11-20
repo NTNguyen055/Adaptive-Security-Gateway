@@ -55,4 +55,25 @@ invalid("untrusted detector origin rejected", {signals={event("waf_sqli", "bad_b
 invalid("malformed input rejected", "unsafe", "invalid_input")
 invalid("invalid risk score rejected", {risk_score=101}, "invalid_risk_score")
 
+-- A1 hardening: sparse/holey/non-array data must never be treated as clean.
+invalid("A1 sparse array at index 2", {signals={[2]=event("waf_sqli", "waf_sqli_xss")}}, "invalid_signal_array")
+invalid("A1 hole at index 2", {signals={[1]=event("ua_unknown", "bad_bot"), [3]=event("waf_sqli", "waf_sqli_xss")}}, "invalid_signal_array")
+invalid("A1 associative event table", {signals={attack=event("waf_sqli", "waf_sqli_xss")}}, "invalid_signal_array")
+invalid("A1 mixed map and numeric", {signals={[1]=event("waf_sqli", "waf_sqli_xss"), extra=true}}, "invalid_signal_array")
+invalid("A1 empty event", {signals={[1]={}}}, "invalid_signal_at_1")
+invalid("A1 invalid event id", {signals={event("waf-sqli", "waf_sqli_xss")}}, "invalid_signal_at_1")
+invalid("A1 oversized signal list", {signals=(function()
+    local a={} for i=1,65 do a[i]=event("ua_unknown", "bad_bot") end
+    return a
+end)()}, "too_many_signals")
+invalid("A1 invalid required flag", {required_control_failed="false"}, "invalid_boolean_field")
+invalid("A1 invalid jwt flag", {jwt_required=1}, "invalid_boolean_field")
+invalid("A1 invalid jwt status", {jwt_status="bypass"}, "invalid_jwt_status")
+check("A1 blacklist cached is request block only", {signals={event("ip_blacklist_cached", "ip_blacklist")}}, "BLOCK_REQUEST",403,"request")
+check("A1 legacy block without signals preserved", {legacy_blocked=true}, "BLOCK_REQUEST",403,"request")
+check("A1 unknown module block before rate preserved", {legacy_blocked=true, signals={event("rate_limit_hard", "rate_limit")}}, "BLOCK_REQUEST",403,"request")
+check("A1 non-rate block never downgraded by rate-only flag", {legacy_blocked=true, legacy_rate_only=true, signals={event("rate_limit_hard", "rate_limit")}}, "BLOCK_REQUEST",403,"request")
+check("A1 rate-only marker without rate signal not override block", {legacy_blocked=true, legacy_rate_only=true}, "BLOCK_REQUEST",403,"request")
+check("A1 confirmed JWT denial even if optional", {signals={event("jwt_invalid", "jwt_auth")}}, "BLOCK_REQUEST",403,"request")
+
 print(string.format("%d security policy contract tests PASS", passed))
