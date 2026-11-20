@@ -137,9 +137,12 @@ post_invalid_login() {
 
   [[ "$status" == "302" ]] ||
     fail "Expected invalid Django login to redirect with HTTP 302, received $status"
-  docker exec "$CLIENT" grep -qiE '^X-Login-Status:[[:space:]]*failed' \
-    /tmp/asg-bruteforce-response.headers ||
-    fail "Django response did not expose X-Login-Status: failed to OpenResty"
+  # Internal login headers must never be exposed to clients.
+  if docker exec "$CLIENT" grep -qiE \
+    '^X-Login-(Status|Accounting|Alert):' \
+    /tmp/asg-bruteforce-response.headers; then
+    fail "Internal login security header leaked to HTTP client"
+  fi
 }
 
 wait_for_counter() {
@@ -166,7 +169,7 @@ wait_for_key() {
 
 for attempt in 1 2 3 4 5; do
   post_invalid_login
-  pass "Failed login ${attempt}/5 reached Django and returned X-Login-Status: failed"
+  pass "Failed login ${attempt}/5 returned HTTP 302 without leaking internal headers"
   wait_for_counter "$attempt"
   pass "Redis failed-attempt counter reached ${attempt}/5"
 done

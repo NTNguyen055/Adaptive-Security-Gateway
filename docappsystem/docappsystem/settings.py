@@ -83,6 +83,15 @@ USE_X_FORWARDED_PORT    = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ============================================================
+# LOGIN SECURITY — ATOMIC ACCOUNTING
+# ============================================================
+# OFF by default until integration and fault-injection tests pass.
+LOGIN_ACCOUNTING_ENABLED = (
+    get_env("LOGIN_ACCOUNTING_ENABLED", "false").strip().lower()
+    in ("true", "1", "yes")
+)
+
+# ============================================================
 # SECURITY HEADERS
 # ============================================================
 SECURE_SSL_REDIRECT              = False  # Nginx đã lo việc Redirect HTTP -> HTTPS

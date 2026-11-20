@@ -5,6 +5,19 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from dasapp.models import CustomUser
 from django.contrib.auth import get_user_model
+from django.contrib.auth.forms import PasswordChangeForm
+from django.contrib.auth import update_session_auth_hash
+from django.views.decorators.http import require_POST
+
+import logging
+
+from django.conf import settings
+from docappsystem.login_accounting import (
+    AccountingError,
+    LoginAccounting,
+)
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -18,55 +31,177 @@ def doLogout(request):
     logout(request)
     return redirect('login')
 
+@require_POST
 def doLogin(request):
-    if request.method == 'POST':
-        email = request.POST.get('email')
-        password = request.POST.get('password')
-        
-        user = EmailBackEnd.authenticate(request,
-                                         username=email,
-                                         password=password
-                                         )
-        if user!=None:
-            login(request,user)
+    accounting_enabled = getattr(
+        settings,
+        "LOGIN_ACCOUNTING_ENABLED",
+        False,
+    )
 
-            user_type = user.user_type
-            
-            # Khởi tạo mặc định để chống lỗi 500 nếu user_type bị sai lệch
-            response = redirect('login') 
+    accounting = None
+    admission = None
+    client_ip = None
 
-            if user_type == '1':
-                 response = redirect('admin_home')
-            elif user_type == '2':
-                 response = redirect('doctor_home')
-            elif user_type == '3':
-                 response = HttpResponse("This is User panel")
-            
-            # Không cần if response nữa vì chắc chắn response luôn là một HttpResponse
-            response['X-Login-Status'] = 'success'
-            return response
-            
+    def authentication_unavailable():
+        response = HttpResponse(
+            "Authentication temporarily unavailable",
+            status=503,
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+    # ========================================================
+    # STEP 1 — ATOMIC ADMISSION
+    # ========================================================
+    # Chỉ hoạt động khi feature flag được bật.
+    if accounting_enabled:
+        client_ip = request.META.get(
+            "HTTP_X_REAL_IP",
+            "",
+        )
+
+        if not client_ip:
+            logger.error(
+                "[LOGIN_ACCOUNTING] Missing trusted client IP"
+            )
+            return authentication_unavailable()
+
+        try:
+            accounting = LoginAccounting()
+            admission = accounting.admit(client_ip)
+
+        except (AccountingError, ValueError):
+            logger.exception(
+                "[LOGIN_ACCOUNTING] Admission failed"
+            )
+            return authentication_unavailable()
+
+        if admission.status == "LOCKED":
+            return HttpResponse(status=403)
+
+        if admission.status == "SATURATED":
+            return HttpResponse(status=429)
+
+        if (
+            admission.status != "ADMITTED"
+            or not admission.token
+        ):
+            logger.error(
+                "[LOGIN_ACCOUNTING] Unexpected admission state"
+            )
+            return authentication_unavailable()
+
+    # ========================================================
+    # STEP 2 — AUTHENTICATE CREDENTIALS
+    # ========================================================
+    email = request.POST.get("email")
+    password = request.POST.get("password")
+
+    # Giữ cách gọi authentication hiện tại của project.
+    user = EmailBackEnd.authenticate(
+        request,
+        username=email,
+        password=password,
+    )
+
+    # ========================================================
+    # STEP 3 — ATOMIC FINALIZATION
+    # ========================================================
+    # Phải hoàn tất trước khi tạo Django session.
+    if accounting_enabled:
+        outcome = (
+            "success"
+            if user is not None
+            else "failed"
+        )
+
+        try:
+            result = accounting.finalize(
+                client_ip,
+                admission.token,
+                outcome,
+            )
+
+        except (AccountingError, ValueError):
+            logger.exception(
+                "[LOGIN_ACCOUNTING] Finalization failed"
+            )
+            return authentication_unavailable()
+
+        if outcome == "success":
+            confirmed = (result == "OK:SUCCESS")
         else:
-                messages.error(request,'Email or Password is not valid')
-                resp = redirect('login')
-                # [NEW] Set header để Nginx biết login thất bại
-                resp['X-Login-Status'] = 'failed'
-                return resp
+            confirmed = result.startswith((
+                "OK:FAILED:",
+                "OK:LOCKED_NEW:",
+                "OK:LOCKED:",
+            ))
+
+        if not confirmed:
+            logger.error(
+                "[LOGIN_ACCOUNTING] Unexpected finalization: %s",
+                result,
+            )
+            return authentication_unavailable()
+
+    # ========================================================
+    # STEP 4 — BUILD LOGIN RESPONSE
+    # ========================================================
+    if user is not None:
+        # Chỉ tạo session sau khi finalization được xác nhận.
+        login(request, user)
+
+        user_type = user.user_type
+
+        response = redirect("login")
+
+        if user_type == "1":
+            response = redirect("admin_home")
+
+        elif user_type == "2":
+            response = redirect("doctor_home")
+
+        elif user_type == "3":
+            response = HttpResponse("This is User panel")
+
+        response["X-Login-Status"] = "success"
+
     else:
-            messages.error(request,'Email or Password is not valid')
-            resp = redirect('login')
-            resp['X-Login-Status'] = 'failed'
-            return resp
+        messages.error(
+            request,
+            "Email or Password is not valid",
+        )
 
-login_required(login_url='/')
+        response = redirect("login")
+        response["X-Login-Status"] = "failed"
+
+    # ========================================================
+    # STEP 5 — INTERNAL ACCOUNTING SIGNAL
+    # ========================================================
+    # Gateway chỉ bỏ legacy timer khi Django đã commit.
+    if accounting_enabled:
+        response["X-Login-Accounting"] = "sync-v2"
+
+        # Only a newly committed lockout triggers an alert.
+        if (
+            outcome == "failed"
+            and result.startswith("OK:LOCKED_NEW:")
+        ):
+            response["X-Login-Alert"] = "brute_force_lockout"
+
+    return response
+
+@login_required(login_url="/login/")
 def PROFILE(request):
-    user = CustomUser.objects.get(id = request.user.id)
-    context = {
-        "user":user,
-    }
-    return render(request,'profile.html',context)
+    return render(
+        request,
+        "profile.html",
+        {"user": request.user},
+    )
 
-@login_required(login_url = '/')
+@login_required(login_url="/login/")
+@require_POST
 def PROFILE_UPDATE(request):
     if request.method == "POST":
         profile_pic = request.FILES.get('profile_pic')
@@ -75,14 +210,11 @@ def PROFILE_UPDATE(request):
         email = request.POST.get('email')
         username = request.POST.get('username')
         print(profile_pic)
-        
 
         try:
             customuser = CustomUser.objects.get(id = request.user.id)
             customuser.first_name = first_name
             customuser.last_name = last_name
-            
-
             
             if profile_pic !=None and profile_pic != "":
                customuser.profile_pic = profile_pic
@@ -94,26 +226,32 @@ def PROFILE_UPDATE(request):
             messages.error(request,"Your profile updation has been failed")
     return render(request, 'profile.html')
 
+@login_required(login_url="/login/")
 def CHANGE_PASSWORD(request):
-     context ={}
-     ch = User.objects.filter(id = request.user.id)
-     
-     if len(ch)>0:
-            data = User.objects.get(id = request.user.id)
-            context["data"]:data             # type: ignore
-     if request.method == "POST":        
-        current = request.POST["cpwd"]
-        new_pas = request.POST['npwd']
-        user = User.objects.get(id = request.user.id)
-        un = user.username
-        check = user.check_password(current)
-        if check == True:
-          user.set_password(new_pas)
-          user.save()
-          messages.success(request,'Password Change  Succeesfully!!!')
-          user = User.objects.get(username=un)
-          login(request, user)
-        else:
-          messages.success(request,'Current Password wrong!!!')
-          return redirect("change_password")
-     return render(request,'change-password.html')
+    if request.method == "POST":
+        form = PasswordChangeForm(
+            user=request.user,
+            data=request.POST,
+        )
+
+        if form.is_valid():
+            user = form.save()
+
+            # Duy trì session hiện tại và cập nhật auth hash.
+            update_session_auth_hash(request, user)
+
+            messages.success(
+                request,
+                "Mật khẩu đã được thay đổi thành công.",
+            )
+
+            return redirect("change_password")
+
+    else:
+        form = PasswordChangeForm(user=request.user)
+
+    return render(
+        request,
+        "change-password.html",
+        {"form": form},
+    )

@@ -58,8 +58,24 @@ end
 -- =============================================================================
 -- SEND TELEGRAM
 -- =============================================================================
-local function telegram_notify_timer(premature, bot_token, chat_id, text)
+local function telegram_notify_timer(
+    premature,
+    bot_token,
+    chat_id,
+    text,
+    cache_key,
+    owns_cache
+)
     if premature then
+        if owns_cache then
+            ngx.shared.ip_cache:delete(cache_key)
+        end
+
+        ngx.log(
+            ngx.WARN,
+            "[TELEGRAM] Timer aborted before delivery"
+        )
+
         return
     end
 
@@ -148,15 +164,25 @@ function _M.send(opts)
         ":" ..
         tostring(opts.attack_type)
 
-    if ngx.shared.ip_cache:get(cache_key) then
-        return
-    end
-
-    ngx.shared.ip_cache:set(
+    -- Atomic deduplication across OpenResty workers.
+    local claimed, cache_err = ngx.shared.ip_cache:add(
         cache_key,
         true,
         TELEGRAM_ALERT_TTL
     )
+
+    if not claimed then
+        if cache_err == "exists" then
+            return
+        end
+
+        -- Cache failure must not prevent scheduling an alert.
+        ngx.log(
+            ngx.ERR,
+            "[TELEGRAM] Alert dedup unavailable: ",
+            tostring(cache_err)
+        )
+    end
 
     local text = format_alert(opts)
 
@@ -165,14 +191,21 @@ function _M.send(opts)
         telegram_notify_timer,
         bot_token,
         chat_id,
-        text
+        text,
+        cache_key,
+        claimed == true
     )
 
     if not ok then
+        -- Timer was not scheduled: release the dedup marker.
+        if claimed then
+            ngx.shared.ip_cache:delete(cache_key)
+        end
+
         ngx.log(
             ngx.ERR,
-            "[TELEGRAM] failed to create timer: ",
-            err
+            "[TELEGRAM] Failed to create timer: ",
+            tostring(err)
         )
     end
 end
