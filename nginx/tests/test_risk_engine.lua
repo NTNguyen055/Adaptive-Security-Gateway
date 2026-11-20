@@ -183,7 +183,7 @@ run_case("strong WAF SQLi evidence still updates reputation and blocks", functio
     risk_engine.run(ctx)
     check(ctx.security.risk_action == "block", "SQLi should be blocked")
     check(kv["risk:v1:" .. ip] ~= nil, "SQLi evidence did not update reputation")
-    check(kv["blacklist:" .. ip] == "1", "SQLi evidence did not create temporary blacklist key")
+    check(kv["blacklist:" .. ip] == nil, "Risk Engine must not create an IP ban from WAF score")
     check(not (sets.blacklist_ips and sets.blacklist_ips[ip]), "auto-block must not enter permanent manual set")
 end)
 

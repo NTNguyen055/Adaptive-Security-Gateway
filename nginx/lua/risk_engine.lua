@@ -58,7 +58,7 @@ if not score or score ~= score or score < 0 or score > 100
     or not ban_ttl or ban_ttl < 1 or ban_ttl > 900
     or (write_seen == 1 and not seen_at)
     or (write_seen ~= 0 and write_seen ~= 1)
-    or (write_ban ~= 0 and write_ban ~= 1)
+    or write_ban ~= 0
     or not expected_score or not expected_seen or not expected_history then
     return redis.error_reply('invalid reputation script args')
 end
@@ -70,9 +70,6 @@ if (redis.call('GET', history_key) or MISSING) ~= expected_history then return 0
 redis.call('SET', score_key, ARGV[1], 'EX', rep_ttl)
 if write_seen == 1 then
     redis.call('SET', seen_key, ARGV[3], 'EX', rep_ttl)
-end
-if write_ban == 1 then
-    redis.call('SET', ban_key, '1', 'EX', ban_ttl)
 end
 return 1
 ]]
@@ -453,27 +450,23 @@ function _M.run(ctx)
             -- Bounded reputation lifetime: 1 hour normal / 2 hours elevated.
             -- Both request decisions and IP reputation remain separate from a manual ban.
             local rep_ttl = REPUTATION_TTL_NORMAL
+
             if final_risk >= cfg.limit_threshold then
                 rep_ttl = REPUTATION_TTL_ELEVATED
             end
-            local ban_now = final_risk >= cfg.block_threshold
+
             local committed, write_err = red:eval(
                 WRITE_REPUTATION_SCRIPT, 4,
                 key, timestamp_key, "blacklist:" .. ip, bf_history_key,
                 string.format("%.2f", final_risk), rep_ttl,
                 tostring(now or 0), cfg.decay_enabled and 1 or 0,
-                ban_now and 1 or 0, AUTOMATIC_BLOCK_TTL,
+                0, AUTOMATIC_BLOCK_TTL,
                 reputation_raw == ngx.null and MISSING_REDIS_VALUE or reputation_raw,
                 last_seen_raw == ngx.null and MISSING_REDIS_VALUE or last_seen_raw,
                 bf_history == ngx.null and MISSING_REDIS_VALUE or bf_history
             )
             if committed == 1 then
                 committed_update = true
-                if ban_now then
-                    ngx.log(ngx.WARN, "[RISK] Temporary auto-block ip=", ip,
-                        " final_risk=", string.format("%.1f", final_risk),
-                        " ttl=", AUTOMATIC_BLOCK_TTL, "s")
-                end
             elseif committed == 0 then
                 -- Another request changed this snapshot. Re-read and recompute.
                 ngx.log(ngx.INFO, "[RISK] Reputation CAS contention ip=", ip,
@@ -527,7 +520,7 @@ function _M.run(ctx)
             ip = ip,
             attack_type = attack_types_str,
             score = final_risk,
-            reason = "Tạm chặn vì tín hiệu tấn công và điểm rủi ro cao",
+            reason = "Request bị từ chối vì mức rủi ro cao; không phát hành IP ban",
             details = "signals=" .. attack_types_str
         })
 

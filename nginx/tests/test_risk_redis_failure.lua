@@ -131,14 +131,23 @@ case("reputation write failure does not create a detached blacklist",function()
   check(state.kv["blacklist:"..ip]==nil and state.kv["risk:v1:last_seen:"..ip]==nil,
         "detached write after failed reputation update")
 end)
-case("atomic temporary-ban failure leaves no partial reputation and preserves request block",function()
-  state.fail_write_key="blacklist:"..ip
-  local ctx=abuse(75,true)
+case("Risk Engine does not depend on automatic IP-ban persistence", function()
+  state.fail_write_key = "blacklist:" .. ip
+
+  local ctx = abuse(75, true)
   module.run(ctx)
-  check(ctx.security.block and ctx.security.risk_action=="block","failed ban write allowed request")
-  check(ctx.security.redis_risk_error,"ban write failure hidden")
-  check(state.kv["risk:v1:"..ip]==nil and state.kv["risk:v1:last_seen:"..ip]==nil,
-        "failed atomic transaction left partial reputation/timestamp")
+
+  check(ctx.security.block and ctx.security.risk_action == "block",
+        "Request-level security block was lost")
+
+  check(not ctx.security.redis_risk_error,
+        "Reputation write incorrectly depended on blacklist")
+
+  check(state.kv["blacklist:" .. ip] == nil,
+        "Risk Engine wrote an unauthorized IP ban")
+
+  check(state.kv["risk:v1:" .. ip] ~= nil,
+        "Reputation update was unexpectedly lost")
 end)
 case("context-only request never opens Redis even when unavailable",function()
   state.unavailable=true
