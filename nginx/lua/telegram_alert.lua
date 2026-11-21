@@ -51,7 +51,7 @@ local function format_alert(opts)
         "Điểm      : " .. score,
         "Chi tiết  : " .. details,
         "────────────────────────",
-        "Trạng thái: IP đã bị BLACKLIST."
+        "Trạng thái: Xem hành động thực tế trong Security Gateway logs."
     }, "\n")
 end
 

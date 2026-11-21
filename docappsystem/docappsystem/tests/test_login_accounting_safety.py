@@ -1,66 +1,77 @@
-"""P0.2 isolated Redis contract checks for abnormal finalization paths.
-
-Place in: docappsystem/docappsystem/tests/test_login_accounting_safety.py
-Run ONLY against local/isolated Redis DB 0, NEVER production.
-"""
+"""Redis fault-injection tests; explicit ASG_RUN_LIVE_REDIS=1 only."""
 import ipaddress
+import os
 import secrets
 import unittest
+from unittest.mock import patch
 
+import redis
 from docappsystem.login_accounting import AccountingError, LoginAccounting
 
 
-class LoginAccountingSafetyTests(unittest.TestCase):
+@unittest.skipUnless(
+    os.getenv('ASG_RUN_LIVE_REDIS') == '1',
+    'explicit opt-in required for real Redis DB0',
+)
+class AccountAwareSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.accounting = LoginAccounting()
+        self.accounting = LoginAccounting(window=120)
         self.redis = self.accounting.redis
-        base = int(ipaddress.IPv6Address("2001:db8::"))
-        self.ip = str(ipaddress.IPv6Address(base | secrets.randbits(96)))
+        self.ip = str(ipaddress.IPv6Address(
+            int(ipaddress.IPv6Address('2001:db8::')) | secrets.randbits(96)
+        ))
+        self.email = f'safety-{secrets.token_hex(12)}@example.invalid'
+        self.keys = self.accounting._keys(self.ip, self.email, 'unused')
+        self.assertEqual(self.redis.exists(*self.keys), 0)
         self.tokens = []
-        self.base_keys = self.accounting._keys(self.ip, "placeholder")
-        self.base_keys.pop(4)
-        self.assertEqual(self.redis.exists(*self.base_keys), 0)
 
     def tearDown(self):
-        keys = self.base_keys + [f"bf:v2:req:{token}" for token in self.tokens]
-        if keys:
-            self.redis.delete(*keys)
+        self.redis.delete(*self.keys)
+        if self.tokens:
+            self.redis.delete(*(f'bf:v3:req:{t}' for t in self.tokens))
 
     def admit(self):
-        admission = self.accounting.admit(self.ip)
-        self.assertEqual(admission.status, "ADMITTED")
-        self.tokens.append(admission.token)
-        return admission
+        result = self.accounting.admit(self.ip, self.email)
+        self.assertEqual(result.status, 'ADMITTED')
+        self.tokens.append(result.token)
+        return result
 
-    def test_wrong_type_preflight_preserves_pending_state(self):
+    def test_wrong_counter_string_refused_before_any_finalization(self):
         a = self.admit()
-        self.redis.rpush(f"brute_force:history:{self.ip}", "bad-state")
+        self.redis.set(self.keys[0], '0.5', ex=120)
         with self.assertRaises(AccountingError):
-            self.accounting.finalize(self.ip, a.token, "failed")
-        self.assertEqual(self.redis.get(f"bf:v2:req:{a.token}"), "pending")
-        self.assertIsNotNone(self.redis.zscore(f"bf:v2:active:{self.ip}", a.token))
-        self.assertIsNone(self.redis.get(f"brute_force:fail:{self.ip}"))
+            self.accounting.finalize(self.ip, self.email, a.token, 'failed')
+        self.assertTrue(self.redis.get(self.keys[3].replace('unused', a.token))
+                        .startswith('pending:'))
+        self.assertEqual(self.redis.get(self.keys[0]), '0.5')
+        self.assertIsNone(self.redis.get(self.keys[1]))
+        self.assertEqual(self.redis.exists(f'blacklist:{self.ip}'), 0)
 
-    def test_runtime_error_keeps_token_indeterminate_and_prevents_replay(self):
+    def test_wrong_type_rejected_before_pending_token_created(self):
+        self.redis.rpush(self.keys[4], 'wrong-type')
+        with self.assertRaises(AccountingError):
+            self.accounting.admit(self.ip, self.email)
+        self.assertIsNone(self.redis.get(self.keys[0]))
+        self.assertEqual(self.redis.exists(self.keys[2]), 0)
+
+    def test_ambiguous_response_never_becomes_verified_session(self):
         a = self.admit()
-        fail_key = f"brute_force:fail:{self.ip}"
-        # A string convertible to float, but invalid for Redis INCR.
-        # Forces a Redis command error AFTER 'processing' was written.
-        self.redis.set(fail_key, "0.5", ex=300)
-        with self.assertRaises(AccountingError):
-            self.accounting.finalize(self.ip, a.token, "failed")
+        actual_eval = self.redis.eval
 
-        self.assertEqual(self.redis.get(f"bf:v2:req:{a.token}"), "processing:failed")
-        self.assertIsNotNone(self.redis.zscore(f"bf:v2:active:{self.ip}", a.token))
-        self.assertEqual(self.redis.get(fail_key), "0.5")
-        self.assertEqual(self.redis.exists(f"brute_force:lockout:{self.ip}"), 0)
-        self.assertEqual(self.redis.exists(f"blacklist:{self.ip}"), 0)
+        def commit_then_transport_loss(*args, **kwargs):
+            result = actual_eval(*args, **kwargs)
+            self.assertEqual(result, 'OK:FAILED:1:1')
+            raise redis.ConnectionError('connection lost after commit')
 
-        # Replaying must not increment (or silently finalize) an uncertain request.
-        with self.assertRaises(AccountingError):
-            self.accounting.finalize(self.ip, a.token, "failed")
-        self.assertEqual(self.redis.get(fail_key), "0.5")
+        with patch.object(self.redis, 'eval', side_effect=commit_then_transport_loss):
+            with self.assertRaises(AccountingError):
+                self.accounting.finalize(self.ip, self.email, a.token, 'failed')
+        # A completed marker is durable; retry cannot double-count.
+        self.assertEqual(self.accounting.finalize(
+            self.ip, self.email, a.token, 'failed'), 'DUPLICATE')
+        self.assertEqual(self.redis.get(self.keys[0]), '1')
+        self.assertEqual(self.redis.get(self.keys[1]), '1')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

@@ -51,6 +51,21 @@ def doLogin(request):
         response["Cache-Control"] = "no-store"
         return response
 
+    # Use the same submitted identifier for accounting
+    # and authentication. Only accounting canonicalizes its HMAC key.
+    email = request.POST.get("email") or ""
+    password = request.POST.get("password")
+
+    if accounting_enabled and (
+        not email.strip()
+        or len(email) > 254
+        or len(email.encode("utf-8")) > 512
+    ):
+        return HttpResponse(
+            "Invalid login credentials",
+            status=400,
+        )
+
     # ========================================================
     # STEP 1 — ATOMIC ADMISSION
     # ========================================================
@@ -69,7 +84,7 @@ def doLogin(request):
 
         try:
             accounting = LoginAccounting()
-            admission = accounting.admit(client_ip)
+            admission = accounting.admit(client_ip, email)
 
         except (AccountingError, ValueError):
             logger.exception(
@@ -77,11 +92,14 @@ def doLogin(request):
             )
             return authentication_unavailable()
 
-        if admission.status == "LOCKED":
-            return HttpResponse(status=403)
-
-        if admission.status == "SATURATED":
-            return HttpResponse(status=429)
+        if admission.status in ("BACKOFF", "SATURATED"):
+            response = HttpResponse(
+                "Too many login requests",
+                status=429,
+            )
+            response["Retry-After"] = "10"
+            response["Cache-Control"] = "no-store"
+            return response
 
         if (
             admission.status != "ADMITTED"
@@ -95,8 +113,6 @@ def doLogin(request):
     # ========================================================
     # STEP 2 — AUTHENTICATE CREDENTIALS
     # ========================================================
-    email = request.POST.get("email")
-    password = request.POST.get("password")
 
     # Giữ cách gọi authentication hiện tại của project.
     user = EmailBackEnd.authenticate(
@@ -119,6 +135,7 @@ def doLogin(request):
         try:
             result = accounting.finalize(
                 client_ip,
+                email,
                 admission.token,
                 outcome,
             )
@@ -132,11 +149,7 @@ def doLogin(request):
         if outcome == "success":
             confirmed = (result == "OK:SUCCESS")
         else:
-            confirmed = result.startswith((
-                "OK:FAILED:",
-                "OK:LOCKED_NEW:",
-                "OK:LOCKED:",
-            ))
+            confirmed = result.startswith(("OK:FAILED:",))
 
         if not confirmed:
             logger.error(
@@ -181,14 +194,14 @@ def doLogin(request):
     # ========================================================
     # Gateway chỉ bỏ legacy timer khi Django đã commit.
     if accounting_enabled:
-        response["X-Login-Accounting"] = "sync-v2"
+        response["X-Login-Accounting"] = "sync-v3"
 
-        # Only a newly committed lockout triggers an alert.
-        if (
-            outcome == "failed"
-            and result.startswith("OK:LOCKED_NEW:")
-        ):
-            response["X-Login-Alert"] = "brute_force_lockout"
+        if outcome == "failed":
+            if result.endswith(":ACCOUNT_THRESHOLD_NEW"):
+                response["X-Login-Alert"] = "account_guessing"
+
+            elif admission.spray_threshold_new:
+                response["X-Login-Alert"] = "password_spraying"
 
     return response
 

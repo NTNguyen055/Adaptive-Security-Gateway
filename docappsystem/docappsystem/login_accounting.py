@@ -1,286 +1,309 @@
-"""P0.2 Login Accounting V2 – integration candidate, not activated.
+"""NAT-aware, account-aware atomic login accounting.
 
-Suggested project destination: docappsystem/docappsystem/login_accounting.py
+Feature-flagged OFF by default. Requires gateway-trusted X-Real-IP on /doLogin/.
+Passwords and raw email addresses are never placed into Redis keys or logs.
 
-Requires redis-py (normally a dependency of django-redis).
-Security-critical: callers must fail closed on AccountingError and MUST
-finalize success before calling django.contrib.auth.login().
-
-This revision is for testing the admission/finalization state machine.
-It does not send Telegram notifications; preserve existing alerting when
-integrating.  Do not enable without fault injection and regression tests.
+Risk trade-off: backoff/active-admission contention can still temporarily delay a
+legitimate user during an ongoing targeted account attack. Without a verified
+step-up channel (e.g. MFA), zero attacker-induced account DoS is impossible.
+Do not deploy publicly until gateway trust, fault injection and E2E are verified.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import hmac
 from ipaddress import ip_address
 import os
 import secrets
 
+from django.conf import settings
 import redis
 
 
 class AccountingError(Exception):
-    """Storage or protocol could not be verified: do not authenticate."""
+    """Could not prove atomic accounting state; fail closed before session."""
 
 
+# KEYS (same positions for admit and finalize):
+# 1 account_fail, 2 account+source pair_fail, 3 active-account ZSET,
+# 4 request token, 5 per-source distinct-target ZSET,
+# 6 account short-backoff gate, 7 pair short-backoff gate, 8 success marker.
+# No legacy blacklist, IP lockout, or IP reputation keys.
 ADMIT_SCRIPT = r"""
-local lock = redis.call('GET', KEYS[2])
-local black = redis.call('GET', KEYS[3])
-if lock or black then return 'LOCKED' end
-
-local fail_value = redis.call('GET', KEYS[1])
-local failures = tonumber(fail_value or '0')
-if not failures or failures < 0 then return 'ERROR:COUNTER' end
-if failures >= tonumber(ARGV[1]) then return 'LOCKED' end
-
--- Redis server time, rather than Django/Gateway clocks.
-local now = tonumber(redis.call('TIME')[1])
-local active_type = redis.call('TYPE', KEYS[4]).ok
-if active_type ~= 'none' and active_type ~= 'zset' then
-  return 'ERROR:ACTIVE_TYPE'
+local function good_type(key, expected)
+  local t = redis.call('TYPE', key).ok
+  return t == 'none' or t == expected
 end
+local function count(key)
+  local raw = redis.call('GET', key)
+  if not raw then return 0 end
+  if not string.match(raw, '^%d+$') then return nil end
+  local n = tonumber(raw)
+  if not n or n < 0 or n > 1000000000 then return nil end
+  return n
+end
+if not good_type(KEYS[1], 'string') or
+   not good_type(KEYS[2], 'string') or
+   not good_type(KEYS[3], 'zset') or
+   not good_type(KEYS[4], 'string') or
+   not good_type(KEYS[5], 'zset') or
+   not good_type(KEYS[6], 'string') or
+   not good_type(KEYS[7], 'string') or
+   not good_type(KEYS[8], 'string') then
+  return 'ERROR:TYPE'
+end
+local account_n = count(KEYS[1])
+local pair_n = count(KEYS[2])
+if not account_n or not pair_n then return 'ERROR:COUNTER' end
+if redis.call('EXISTS', KEYS[4]) ~= 0 then return 'REPLAY' end
+local account_hot = account_n >= tonumber(ARGV[1])
+local pair_hot = pair_n >= tonumber(ARGV[2])
+if account_hot and redis.call('EXISTS', KEYS[6]) ~= 0 then
+  return 'BACKOFF'
+end
+if pair_hot and redis.call('EXISTS', KEYS[7]) ~= 0 then
+  return 'BACKOFF'
+end
+local now = tonumber(redis.call('TIME')[1])
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
+local active = redis.call('ZCARD', KEYS[3])
+if active >= tonumber(ARGV[3]) then return 'SATURATED' end
+redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - tonumber(ARGV[10]))
+local was_seen = redis.call('ZSCORE', KEYS[5], ARGV[8])
 
--- A reservation consumes a slot for an entire failure window.
--- An interrupted request is never silently assumed successful or failed.
-redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', now)
-local active = redis.call('ZCARD', KEYS[4])
-if failures + active >= tonumber(ARGV[1]) then return 'SATURATED' end
-
--- Random request token, created by Django; never reuse client input.
-local ok = redis.call('SET', KEYS[5], 'pending', 'NX', 'EX', tonumber(ARGV[3]))
-if not ok then return 'REPLAY' end
-redis.call('ZADD', KEYS[4], now + tonumber(ARGV[2]), ARGV[4])
-redis.call('EXPIRE', KEYS[4], tonumber(ARGV[2]) + 1)
+-- Gates reduce guessing throughput, but never create an account lockout key.
+-- One probation request is permitted per bounded backoff period.
+if account_hot then
+  redis.call('SET', KEYS[6], '1', 'EX', tonumber(ARGV[12]))
+end
+if pair_hot then
+  redis.call('SET', KEYS[7], '1', 'EX', tonumber(ARGV[12]))
+end
+local binding = 'pending:' .. ARGV[8] .. ':' .. ARGV[9]
+local created = redis.call(
+  'SET', KEYS[4], binding, 'NX', 'EX', tonumber(ARGV[6]))
+if not created then return 'REPLAY' end
+redis.call('ZADD', KEYS[3], now + tonumber(ARGV[5]), ARGV[7])
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[5]) + 1)
+redis.call('ZADD', KEYS[5], now, ARGV[8])
+redis.call('EXPIRE', KEYS[5], tonumber(ARGV[10]) + 1)
+local distinct = redis.call('ZCARD', KEYS[5])
+if not was_seen and distinct == tonumber(ARGV[11]) then
+  return 'ADMITTED:SPRAY_NEW'
+end
 return 'ADMITTED'
 """
 
 FINALIZE_SCRIPT = r"""
+local function good_type(key, expected)
+  local t = redis.call('TYPE', key).ok
+  return t == 'none' or t == expected
+end
+local function checked_count(key)
+  local raw = redis.call('GET', key)
+  if not raw then return 0 end
+  if not string.match(raw, '^%d+$') then return nil end
+  local n = tonumber(raw)
+  if not n or n < 0 or n >= 1000000000 then return nil end
+  return n
+end
 local outcome = ARGV[2]
 if outcome ~= 'success' and outcome ~= 'failed' then return 'ERROR:OUTCOME' end
-
-local state = redis.call('GET', KEYS[5])
-if state == 'done:' .. outcome then return 'DUPLICATE' end
+local binding = ARGV[5] .. ':' .. ARGV[6]
+local pending = 'pending:' .. binding
+local done = 'done:' .. outcome .. ':' .. binding
+local state = redis.call('GET', KEYS[4])
+if state == done then return 'DUPLICATE' end
 if state and string.sub(state, 1, 5) == 'done:' then return 'CONFLICT' end
-
--- An uncertain finalization must not be retried blindly.
 if state and string.sub(state, 1, 11) == 'processing:' then
   return 'INDETERMINATE'
 end
-if state ~= 'pending' then return 'UNKNOWN' end
-
-local active_type = redis.call('TYPE', KEYS[4]).ok
-if active_type ~= 'zset' then return 'EXPIRED' end
-
-local score = tonumber(redis.call('ZSCORE', KEYS[4], ARGV[1]) or '')
-local now = tonumber(redis.call('TIME')[1])
-if not score or score <= now then return 'EXPIRED' end
-
-local failures = tonumber(redis.call('GET', KEYS[1]) or '0')
-if not failures or failures < 0 then return 'ERROR:COUNTER' end
-
-local history = ''
-local risk = 0
-
-if outcome == 'failed' then
-  history = redis.call('GET', KEYS[6]) or ''
-  risk = tonumber(redis.call('GET', KEYS[7]) or '0')
-  if not risk then return 'ERROR:RISK' end
-end
-
--- Validate key types BEFORE any write.
--- Redis Lua does not automatically roll back partial writes.
-local function valid_type(key, desired)
-  local t = redis.call('TYPE', key).ok
-  return t == 'none' or t == desired
-end
-
-if not valid_type(KEYS[1], 'string') or
-   not valid_type(KEYS[2], 'string') or
-   not valid_type(KEYS[3], 'string') or
-   not valid_type(KEYS[5], 'string') or
-   not valid_type(KEYS[6], 'string') or
-   not valid_type(KEYS[7], 'string') or
-   not valid_type(KEYS[8], 'string') then
+if state ~= pending then return 'UNKNOWN' end
+if not good_type(KEYS[1], 'string') or
+   not good_type(KEYS[2], 'string') or
+   not good_type(KEYS[3], 'zset') or
+   not good_type(KEYS[5], 'zset') or
+   not good_type(KEYS[6], 'string') or
+   not good_type(KEYS[7], 'string') or
+   not good_type(KEYS[8], 'string') then
   return 'ERROR:TYPE'
 end
-
--- Mark the request as indeterminate before performing writes.
--- Never claim the request has finished prematurely.
-local claimed = redis.call(
-  'SET',
-  KEYS[5],
-  'processing:' .. outcome,
-  'XX',
-  'EX',
-  tonumber(ARGV[6])
-)
-
+local score = tonumber(redis.call('ZSCORE', KEYS[3], ARGV[1]) or '')
+local now = tonumber(redis.call('TIME')[1])
+if not score or score <= now then return 'EXPIRED' end
+local account_n, pair_n = 0, 0
+if outcome == 'failed' then
+  account_n = checked_count(KEYS[1])
+  pair_n = checked_count(KEYS[2])
+  if not account_n or not pair_n then return 'ERROR:COUNTER' end
+end
+local claimed = redis.call('SET', KEYS[4],
+  'processing:' .. outcome .. ':' .. binding,
+  'XX', 'EX', tonumber(ARGV[4]))
 if not claimed then return 'ERROR:CLAIM' end
-
 local result = 'OK:SUCCESS'
-
-if outcome == 'success' then
-  -- Successful login does not reset failed attempts.
-  redis.call(
-    'SET',
-    KEYS[8],
-    tostring(now),
-    'EX',
-    tonumber(ARGV[3])
-  )
-else
-  local count = redis.call('INCR', KEYS[1])
-
-  if count == 1 or redis.call('TTL', KEYS[1]) < 0 then
+if outcome == 'failed' then
+  account_n = redis.call('INCR', KEYS[1])
+  pair_n = redis.call('INCR', KEYS[2])
+  if account_n == 1 or redis.call('TTL', KEYS[1]) < 0 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
   end
-
-  local entry = tostring(now) .. ':' .. tostring(count)
-  local entries = {entry}
-
-  for v in string.gmatch(history, '([^,]+)') do
-    if #entries >= 10 then break end
-    entries[#entries + 1] = v
+  if pair_n == 1 or redis.call('TTL', KEYS[2]) < 0 then
+    redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
   end
-
-  redis.call(
-    'SET',
-    KEYS[6],
-    table.concat(entries, ','),
-    'EX',
-    86400
-  )
-
-  if count >= tonumber(ARGV[4]) then
-    local cooldown = tonumber(ARGV[5])
-
-    redis.call('EXPIRE', KEYS[1], cooldown)
-    redis.call('SET', KEYS[2], '1', 'EX', cooldown)
-    redis.call('SET', KEYS[3], '1', 'EX', cooldown)
-
-    if count == tonumber(ARGV[4]) then
-      local new_risk = math.min(
-        risk + tonumber(ARGV[7]),
-        100
-      )
-
-      local risk_ttl = 86400
-      if new_risk >= 80 then
-        risk_ttl = 31536000
-      end
-
-      redis.call(
-        'SET',
-        KEYS[7],
-        string.format('%.2f', new_risk),
-        'EX',
-        risk_ttl
-      )
-
-      result = 'OK:LOCKED_NEW:' .. tostring(count)
-    else
-      result = 'OK:LOCKED:' .. tostring(count)
-    end
-  else
-    result = 'OK:FAILED:' .. tostring(count)
+  result = 'OK:FAILED:' .. tostring(account_n) .. ':' .. tostring(pair_n)
+  if account_n == tonumber(ARGV[7]) then
+    result = result .. ':ACCOUNT_THRESHOLD_NEW'
   end
+else
+  redis.call('SET', KEYS[8], tostring(now), 'EX', tonumber(ARGV[3]))
 end
-
--- Release reservation after security-state writes.
-redis.call('ZREM', KEYS[4], ARGV[1])
-
--- Commit marker LAST.
-redis.call(
-  'SET',
-  KEYS[5],
-  'done:' .. outcome,
-  'EX',
-  tonumber(ARGV[6])
-)
-
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('SET', KEYS[4], done, 'EX', tonumber(ARGV[4]))
 return result
 """
+
 
 @dataclass(frozen=True)
 class Admission:
     status: str
     token: str | None = None
+    spray_threshold_new: bool = False
 
 
 class LoginAccounting:
-    """State machine against Redis DB 0; one key namespace per canonical IP."""
+    """Atomic Redis DB0 accounting, with HMAC pseudonymous account keys."""
 
     def __init__(
         self,
         redis_url: str | None = None,
-        max_attempts: int | None = None,
+        max_account_failures: int | None = None,
+        max_pair_failures: int | None = None,
         window: int | None = None,
-        cooldown: int | None = None,
-        risk_penalty: float | None = None,
+        backoff: int | None = None,
+        max_active: int | None = None,
+        reservation_seconds: int | None = None,
+        spray_window: int | None = None,
+        spray_threshold: int | None = None,
     ):
-        url = redis_url or os.getenv('LOGIN_ACCOUNTING_REDIS_URL', 'redis://redis:6379/0')
-        self.redis = redis.Redis.from_url(
-            url, decode_responses=True,
-            socket_connect_timeout=0.25, socket_timeout=1.0,
-            retry_on_timeout=False,
+        url = redis_url or os.getenv(
+            'LOGIN_ACCOUNTING_REDIS_URL', 'redis://redis:6379/0'
         )
+        try:
+            self.redis = redis.Redis.from_url(
+                url, decode_responses=True,
+                socket_connect_timeout=0.25, socket_timeout=1.0,
+                retry_on_timeout=False,
+            )
+        except (redis.RedisError, ValueError) as exc:
+            raise AccountingError('Accounting Redis configuration unavailable') from exc
         if self.redis.connection_pool.connection_kwargs.get('db', 0) != 0:
             raise ValueError('Login Accounting must use Redis DB 0')
-        self.max_attempts = int(max_attempts or os.getenv('BRUTE_FORCE_MAX_ATTEMPTS', 5))
-        self.window = int(window or os.getenv('BRUTE_FORCE_WINDOW', 300))
-        self.cooldown = int(cooldown or os.getenv('BRUTE_FORCE_COOLDOWN', 3600))
-        self.risk_penalty = float(risk_penalty or os.getenv('BRUTE_FORCE_RISK_PENALTY', 80))
-        if self.max_attempts < 1 or self.window < 1 or self.cooldown < 1:
-            raise ValueError('Invalid login accounting security settings')
-        self.pending_ttl = self.window + 60
+        def setting(value, name, default):
+            result = int(value if value is not None else os.getenv(name, default))
+            if result < 1 or result > 86400:
+                raise ValueError('Invalid login accounting limit')
+            return result
+
+        self.account_limit = setting(
+            max_account_failures, 'LOGIN_ACCOUNT_MAX_FAILURES', 12)
+        self.pair_limit = setting(
+            max_pair_failures, 'LOGIN_PAIR_MAX_FAILURES', 5)
+        self.window = setting(window, 'BRUTE_FORCE_WINDOW', 300)
+        self.backoff = setting(backoff, 'LOGIN_ACCOUNT_BACKOFF_SECONDS', 10)
+        self.max_active = setting(max_active, 'LOGIN_ACCOUNT_MAX_ACTIVE', 4)
+        self.reservation_seconds = setting(
+            reservation_seconds, 'LOGIN_RESERVATION_SECONDS', 30)
+        self.spray_window = setting(
+            spray_window, 'LOGIN_SPRAY_WINDOW_SECONDS', 60)
+        self.spray_threshold = setting(
+            spray_threshold, 'LOGIN_SPRAY_DISTINCT_THRESHOLD', 10)
+        self.pending_ttl = self.reservation_seconds + 60
         self.done_ttl = max(120, self.window)
 
-    def _keys(self, ip: str, token: str) -> list[str]:
-        return [
-            f'brute_force:fail:{ip}',
-            f'brute_force:lockout:{ip}',
-            f'blacklist:{ip}',
-            f'bf:v2:active:{ip}',
-            f'bf:v2:req:{token}',
-            f'brute_force:history:{ip}',
-            f'risk:v1:{ip}',
-            f'brute_force:success:{ip}',
-        ]
+    @staticmethod
+    def _canonical_ip(value: str) -> str:
+        return str(ip_address(value))
 
     @staticmethod
-    def _canonical_ip(ip: str) -> str:
-        return str(ip_address(ip))
+    def _canonical_account(email: str) -> str:
+        if not isinstance(email, str):
+            raise ValueError('Invalid account identifier')
+        value = email.strip().casefold()
+        if not value or len(value) > 254 or len(value.encode('utf-8')) > 512:
+            raise ValueError('Invalid account identifier')
+        return value
 
-    def admit(self, client_ip: str) -> Admission:
+    @staticmethod
+    def _digest(label: str, raw: str) -> str:
+        key = settings.SECRET_KEY.encode('utf-8')
+        return hmac.new(
+            key,
+            ('asg:bf:v3:' + label + '\0' + raw).encode('utf-8'),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _keys(self, client_ip: str, email: str, token: str) -> list[str]:
+        ip = self._canonical_ip(client_ip)
+        account = self._canonical_account(email)
+        acct_hash = self._digest('account', account)
+        source_hash = self._digest('source', ip)
+        pair_hash = self._digest('pair', account + '\0' + ip)
+        return [
+            f'bf:v3:acct_fail:{acct_hash}',
+            f'bf:v3:pair_fail:{pair_hash}',
+            f'bf:v3:active:{acct_hash}',
+            f'bf:v3:req:{token}',
+            f'bf:v3:source_targets:{source_hash}',
+            f'bf:v3:acct_gate:{acct_hash}',
+            f'bf:v3:pair_gate:{pair_hash}',
+            f'bf:v3:success:{acct_hash}',
+        ]
+
+    def admit(self, client_ip: str, email: str) -> Admission:
         try:
             ip = self._canonical_ip(client_ip)
+            account = self._canonical_account(email)
             token = secrets.token_hex(16)
-            keys = self._keys(ip, token)
+            keys = self._keys(ip, account, token)
+            acct_hash = self._digest('account', account)
+            pair_hash = self._digest('pair', account + '\0' + ip)
             result = self.redis.eval(
-                ADMIT_SCRIPT, 5, *keys[:5],
-                self.max_attempts, self.window, self.pending_ttl, token,
+                ADMIT_SCRIPT, 8, *keys,
+                self.account_limit, self.pair_limit, self.max_active,
+                self.window, self.reservation_seconds, self.pending_ttl,
+                token, acct_hash, pair_hash, self.spray_window,
+                self.spray_threshold, self.backoff,
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
             raise AccountingError('Admission state unavailable') from exc
-        if result == 'ADMITTED':
-            return Admission('ADMITTED', token)
-        if result in ('LOCKED', 'SATURATED'):
+        if result in ('ADMITTED', 'ADMITTED:SPRAY_NEW'):
+            return Admission(
+                'ADMITTED', token, result == 'ADMITTED:SPRAY_NEW'
+            )
+        if result in ('BACKOFF', 'SATURATED'):
             return Admission(result)
         raise AccountingError(f'Unexpected admission result: {result}')
 
-    def finalize(self, client_ip: str, token: str, outcome: str) -> str:
+    def finalize(
+        self, client_ip: str, email: str, token: str, outcome: str
+    ) -> str:
         if outcome not in ('success', 'failed'):
             raise ValueError('Invalid outcome')
-        if not isinstance(token, str) or len(token) != 32 or not all(c in '0123456789abcdef' for c in token):
+        if (not isinstance(token, str) or len(token) != 32
+                or any(c not in '0123456789abcdef' for c in token)):
             raise ValueError('Invalid token')
         try:
             ip = self._canonical_ip(client_ip)
+            account = self._canonical_account(email)
+            keys = self._keys(ip, account, token)
+            acct_hash = self._digest('account', account)
+            pair_hash = self._digest('pair', account + '\0' + ip)
             result = self.redis.eval(
-                FINALIZE_SCRIPT, 8, *self._keys(ip, token),
-                token, outcome, self.window, self.max_attempts,
-                self.cooldown, self.done_ttl, self.risk_penalty,
+                FINALIZE_SCRIPT, 8, *keys,
+                token, outcome, self.window, self.done_ttl,
+                acct_hash, pair_hash, self.account_limit,
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
             raise AccountingError('Finalization state unavailable') from exc

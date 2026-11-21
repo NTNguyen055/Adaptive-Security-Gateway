@@ -1,199 +1,226 @@
 #!/usr/bin/env bash
-# P0.2.3-D3.3-F — local-only HTTP concurrency / lockout test.
-# Must run from the root of Adaptive-Security-Gateway in Git Bash.
-# Requires docker-compose.dev.yml, docker-compose.p02-e2e.yml, .env.local.
-# Does NOT change source or .env.local; restores flag OFF on exit.
+# local-only Account-Aware Login Accounting HTTP E2E.
+# Rebuilds app/gateway, temporarily enables V3, and restores flag OFF on EXIT.
+# No users are created; synthetic .invalid identifiers only.
+# Never FLUSHDB / DEL by prefix. No production use.
 set -Eeuo pipefail
+export MSYS_NO_PATHCONV=1
 
-for file in docker-compose.dev.yml docker-compose.p02-e2e.yml .env.local; do
-  if [[ ! -f "$file" ]]; then
-    echo "ERROR: Missing $file in current directory" >&2
-    exit 1
-  fi
-done
-command -v docker >/dev/null
-
+cd "$(dirname "$0")/../../"
 BASE=(docker compose --env-file .env.local -f docker-compose.dev.yml)
-E2E=(docker compose --env-file .env.local -f docker-compose.dev.yml -f docker-compose.p02-e2e.yml)
-CLIENT="p02-e2e-client-$(date +%s)-${RANDOM}"
-IP=""
-CAN_CLEAN_KEYS=0
+OVERLAY="$(mktemp ./.asg-a33-compose-XXXXXX.yml)"
+TEST=(docker compose --env-file .env.local -f docker-compose.dev.yml -f "$OVERLAY")
+CLIENTS=()
+KEYS=()
+OWNED=0
 NEED_ROLLBACK=0
+PASS=0
 
-redis() {
-  "${BASE[@]}" exec -T redis redis-cli --raw -n 0 "$@" | tr -d '\r'
+redis() { "${BASE[@]}" exec -T redis redis-cli --raw -n 0 "$@" | tr -d '\r'; }
+pass() { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
+fail() { printf 'FAIL  %s\n' "$1" >&2; exit 1; }
+flag() {
+  "${BASE[@]}" exec -T app python -c \
+    'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' \
+    | tr -d '\r\n'
 }
-
 cleanup() {
-  local status=$?
+  local rc=$?
   trap - EXIT INT TERM
   set +e
-  echo
-  echo "=== CLEANUP: isolated security keys and disposable client ==="
-  if [[ "$CAN_CLEAN_KEYS" == 1 && -n "$IP" ]]; then
-    redis DEL \
-      "brute_force:fail:$IP" \
-      "brute_force:lockout:$IP" \
-      "blacklist:$IP" \
-      "brute_force:history:$IP" \
-      "brute_force:success:$IP" \
-      "risk:v1:$IP" \
-      "bf:v2:active:$IP" >/dev/null || true
-    echo "Only test-IP keys were removed; expiring bf:v2:req:<token> keys are left to TTL."
+  for client in "${CLIENTS[@]}"; do
+    docker rm -f "$client" >/dev/null 2>&1
+  done
+  if (( OWNED == 1 && ${#KEYS[@]} > 0 )); then
+    redis DEL "${KEYS[@]}" >/dev/null 2>&1
   fi
-  docker rm -f "$CLIENT" >/dev/null 2>&1 || true
-  if [[ "$NEED_ROLLBACK" == 1 ]]; then
-    echo "=== ROLLBACK: local feature flag OFF; restore Gateway environment ==="
-    if ! "${BASE[@]}" up -d --no-deps --force-recreate --wait app; then
-      echo "CRITICAL: App rollback failed. Restore it with base Compose manually." >&2
-      status=1
-    fi
-    if ! "${BASE[@]}" up -d --no-deps --force-recreate --wait gateway; then
-      echo "CRITICAL: Gateway rollback failed. Restore it with base Compose manually." >&2
-      status=1
-    fi
-    echo "=== RESTORED RUNTIME FLAG ==="
-    local restored_flag
-    restored_flag=$("${BASE[@]}" exec -T app python -c \
-      'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' 2>/dev/null | tr -d '\r\n')
-    echo "LOGIN_ACCOUNTING_ENABLED = $restored_flag"
-    if [[ "$restored_flag" != False ]]; then
-      echo "CRITICAL: Flag was not confirmed OFF after rollback" >&2
-      status=1
+  if (( NEED_ROLLBACK == 1 )); then
+    echo '=== Restoring LOGIN_ACCOUNTING_ENABLED=false ==='
+    "${BASE[@]}" up -d --no-deps --force-recreate --wait app || rc=1
+    "${BASE[@]}" up -d --no-deps --force-recreate --wait gateway || rc=1
+    if [[ $(flag) != 'False' ]]; then
+      echo 'CRITICAL: Accounting flag not restored OFF' >&2
+      rc=1
     fi
   fi
-  if [[ "$status" -eq 0 ]]; then
-    echo "PASS: D3.3-F local concurrent login E2E"
-  else
-    echo "FAIL/ABORT: D3.3-F (exit $status); check output and rollback above" >&2
+  rm -f "$OVERLAY"
+  if (( rc == 0 )); then
+    printf 'A3.3 local account-aware HTTP E2E: %d passed, 0 failed\n' "$PASS"
   fi
-  exit "$status"
+  exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-initial_flag=$("${BASE[@]}" exec -T app python -c \
-  'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' | tr -d '\r\n')
-if [[ "$initial_flag" != "False" ]]; then
-  echo "STOP: Expected running app flag False, got '$initial_flag'." >&2
-  exit 1
-fi
+[[ -f .env.local && -f docker-compose.dev.yml ]] || fail 'Missing local compose/env'
+[[ $(redis PING) == PONG ]] || fail 'Redis unavailable'
+[[ $(flag) == False ]] || fail 'Running Django flag must be OFF initially'
+base_flag="$("${BASE[@]}" run --rm -T --no-deps app python -c \
+  'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' \
+  | tail -n1 | tr -d '\r\n')"
+[[ "$base_flag" == False ]] || fail 'Base Docker Compose must have flag OFF for rollback'
+pass 'Initial app and base Compose both have accounting disabled'
 
-base_flag=$("${BASE[@]}" run --rm -T --no-deps app python -c \
-  'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' | tail -n 1 | tr -d '\r\n')
-if [[ "$base_flag" != "False" ]]; then
-  echo "STOP: Base Compose must also have flag False for safe rollback (got '$base_flag')." >&2
-  exit 1
-fi
+cat > "$OVERLAY" <<'YAML'
+services:
+  app:
+    environment:
+      LOGIN_ACCOUNTING_ENABLED: "true"
+YAML
 
-echo "=== E2E: Bring Gateway up first (Telegram disabled locally) ==="
+# Validate the temporary Compose overlay before changing runtime.
+[[ -f "$OVERLAY" ]] || fail "Temporary Compose overlay was not created"
+
+"${TEST[@]}" config -q ||
+  fail "Temporary Compose overlay is invalid"
+
+# Do not switch to a potentially stale image when testing migration.
+"${BASE[@]}" build app gateway
 NEED_ROLLBACK=1
-"${E2E[@]}" up -d --no-deps --force-recreate --wait gateway
+"${TEST[@]}" up -d --no-deps --force-recreate --wait app
+"${TEST[@]}" up -d --no-deps --force-recreate --wait gateway
+[[ $(flag) == True ]] || fail 'Runtime accounting flag was not enabled'
+pass 'Account-aware V3 enabled only for isolated local test'
 
-echo "=== E2E: Bring app up with LOGIN_ACCOUNTING_ENABLED=True ==="
-"${E2E[@]}" up -d --no-deps --force-recreate --wait app
-runtime_flag=$("${E2E[@]}" exec -T app python -c \
-  'from django.conf import settings; print(settings.LOGIN_ACCOUNTING_ENABLED)' | tr -d '\r\n')
-if [[ "$runtime_flag" != "True" ]]; then
-  echo "STOP: Expected True in running app, got '$runtime_flag'" >&2
-  exit 1
-fi
+GATEWAY_ID="$("${TEST[@]}" ps -q gateway)"
+NETWORK="$(docker inspect "$GATEWAY_ID" --format \
+  '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' | head -n1)"
+[[ -n "$NETWORK" ]] || fail 'Cannot find disposable Docker network'
 
-"${E2E[@]}" exec -T gateway sh -c \
-  'grep -q "X-Login-Accounting" /usr/local/openresty/nginx/conf/nginx.conf && grep -q "X-Login-Alert" /usr/local/openresty/nginx/conf/nginx.conf'
+new_client() {
+  local name="asg-a33-$(date +%s)-$RANDOM"
+  docker run -d --name "$name" --network "$NETWORK" \
+    --entrypoint sh adaptive-security-gateway:local \
+    -c 'sleep 900' >/dev/null
+  CLIENTS+=("$name")
+  printf '%s' "$name"
+}
 
-health=$(curl -k -sS --max-time 10 -o /dev/null -w '%{http_code}' https://localhost/health/)
-[[ "$health" == 200 ]] || { echo "STOP: /health/ returned $health"; exit 1; }
+# Do not invoke new_client inside command substitution: changes to CLIENTS
+# would execute in a subshell and escape cleanup tracking.
+new_client >/dev/null
+CLIENT1="${CLIENTS[0]}"
+new_client >/dev/null
+CLIENT2="${CLIENTS[1]}"
+IP1="$(docker inspect "$CLIENT1" --format \
+  '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')"
+IP2="$(docker inspect "$CLIENT2" --format \
+  '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')"
+[[ "$IP1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && \
+   "$IP2" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && \
+   "$IP1" != "$IP2" ]] || fail 'Invalid disposable client IPs'
 
-echo "=== E2E: Start disposable Docker client (unique source IP) ==="
-"${E2E[@]}" run -d --no-deps --name "$CLIENT" --entrypoint sh gateway -c 'sleep 600' >/dev/null
-IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CLIENT")
-[[ "$IP" =~ ^172\.20\.0\.[0-9]+$ ]] || { echo "STOP: Unexpected client IP '$IP'"; exit 1; }
-echo "Isolated test client IP: $IP"
+SUFFIX="$(date +%s)-$RANDOM"
+EMAIL_A="a33-a-${SUFFIX}@example.invalid"
+EMAIL_B="a33-b-${SUFFIX}@example.invalid"
 
-keys=(
-  "brute_force:fail:$IP" "brute_force:lockout:$IP"
-  "blacklist:$IP" "brute_force:history:$IP"
-  "brute_force:success:$IP" "risk:v1:$IP" "bf:v2:active:$IP"
-)
-if [[ "$(redis EXISTS "${keys[@]}")" != 0 ]]; then
-  echo "STOP: Existing Redis keys for test client IP; will not overwrite or delete them." >&2
-  exit 1
-fi
-CAN_CLEAN_KEYS=1
+# Derive the exact HMAC Redis keys using the same Django code. Never calculate
+# keys from raw email or delete arbitrary Redis namespace prefixes.
+append_keys() {
+  local ip="$1" email="$2" raw
+  raw="$("${TEST[@]}" exec -T app python -c \
+    'from docappsystem.login_accounting import LoginAccounting; import sys; print("\n".join(LoginAccounting()._keys(sys.argv[1], sys.argv[2], "unused")))' \
+    "$ip" "$email")" || fail 'Unable to derive isolated V3 keys'
+  while IFS= read -r key; do
+    [[ "$key" == bf:v3:req:* || -z "$key" ]] && continue
+    KEYS+=("$key")
+  done <<< "$raw"
+}
+append_keys "$IP1" "$EMAIL_A"
+append_keys "$IP1" "$EMAIL_B"
+append_keys "$IP2" "$EMAIL_A"
+KEYS+=("brute_force:fail:$IP1" "brute_force:fail:$IP2")
+KEYS+=("brute_force:lockout:$IP1" "brute_force:lockout:$IP2")
+KEYS+=("blacklist:$IP1" "blacklist:$IP2")
+KEYS+=("risk:v1:$IP1" "risk:v1:$IP2")
+mapfile -t KEYS < <(printf '%s\n' "${KEYS[@]}" | sort -u)
 
-# Verify the gateway sees THIS container IP, not a Docker NAT/shared address.
-# Otherwise the test could lock the wrong source IP.
-echo "=== VERIFY CLIENT IP TRUST BEFORE WRONG-PASSWORD REQUESTS ==="
-precheck_http=$(docker exec "$CLIENT" curl -k -sS --max-time 10 \
-  -A "p02-e2e-$CLIENT" -H "Host: localhost" \
-  -o /dev/null -w '%{http_code}' https://gateway/login/)
-[[ "$precheck_http" == 200 ]] || { echo "STOP: Test client GET login HTTP $precheck_http"; exit 1; }
-sleep 6
-observed=$("${E2E[@]}" exec -T gateway sh -c \
-  "grep -F '\"user_agent\":\"p02-e2e-$CLIENT\"' /usr/local/openresty/nginx/logs/security.json.log | tail -n 1" \
-  | sed -n 's/.*"client_ip":"\([^"]*\)".*/\1/p' | tr -d '\r')
-echo "Client container IP: $IP; Gateway logged IP: $observed"
-[[ "$observed" == "$IP" ]] || { echo "STOP: IP trust precheck failed; no attack requests sent"; exit 1; }
+[[ $(redis EXISTS "${KEYS[@]}") == 0 ]] ||
+  fail 'Isolated client already owns keys: refusing to overwrite/delete'
+[[ $(redis SISMEMBER blacklist_ips "$IP1") == 0 && \
+   $(redis SISMEMBER blacklist_ips "$IP2") == 0 ]] ||
+  fail 'Disposable client belongs to manual blacklist'
+OWNED=1
+pass 'Exact synthetic Redis keys were absent before test'
 
-# One same-source-IP client performs eight real, valid-CSRF HTTP logins.
-# Each uses an unknown email, never a real account. No real Telegram delivery.
-echo "=== E2E: 8 concurrent valid-CSRF wrong logins, budget=5 ==="
-docker exec -e TEST_EMAIL="p02-e2e-$(date +%s)-$RANDOM@example.invalid" "$CLIENT" sh -ec '
-  curl -kfsS --max-time 12 -H "Host: localhost" \
-       -c /tmp/p02.cookies -b /tmp/p02.cookies \
-       -o /tmp/p02-login.html https://gateway/login/
-  token=$(sed -n '\''s/.*name="csrfmiddlewaretoken" value="\([^" ]*\)".*/\1/p'\'' /tmp/p02-login.html | head -n 1)
-  test -n "$token" || { echo "STOP: CSRF hidden token missing"; exit 1; }
-  for i in 1 2 3 4 5 6 7 8; do
-    (
-      curl -k -sS --max-time 15 \
-        -H "Host: localhost" \
-        --referer https://localhost/login/ \
-        -b /tmp/p02.cookies \
-        --data-urlencode "csrfmiddlewaretoken=$token" \
-        --data-urlencode "email=$TEST_EMAIL" \
-        --data-urlencode "password=not-a-valid-password" \
-        -D "/tmp/p02.h.$i" -o /dev/null \
-        -w "%{http_code}\n" \
-        https://gateway/doLogin/ > "/tmp/p02.s.$i"
-    ) &
-  done
-  wait
-  echo "HTTP status distribution:"
-  cat /tmp/p02.s.* | sort | uniq -c
-  admitted=$(cat /tmp/p02.s.* | grep -c "^302$" || true)
-  denied=$(cat /tmp/p02.s.* | grep -Ec "^(403|429)$" || true)
-  [ "$admitted" -eq 5 ] && [ "$denied" -eq 3 ] || {
-    echo "FAIL: Expected 5x302 + 3x(403/429), got $admitted / $denied";
-    exit 1;
-  }
-  if grep -iEq "^x-login-(status|accounting|alert):" /tmp/p02.h.*; then
-    echo "FAIL: Internal response header leaked"; exit 1
+login_form() {
+  local client="$1"
+  docker exec "$client" curl -kfsS --max-time 12 \
+    -A 'Mozilla/5.0 A33-local-test' -H 'Host: localhost' \
+    -c /tmp/a33-cookies -b /tmp/a33-cookies \
+    -o /tmp/a33-login.html https://gateway/login/ ||
+      fail 'Cannot GET Django login form'
+  local token
+  token="$(docker exec "$client" grep -o \
+    'name="csrfmiddlewaretoken" value="[^"]*"' /tmp/a33-login.html \
+    | sed -E 's/.*value="([^"]*)".*/\1/' | head -n1)"
+  [[ -n "$token" ]] || fail 'CSRF token missing'
+  printf '%s' "$token"
+}
+CSRF1="$(login_form "$CLIENT1")"
+CSRF2="$(login_form "$CLIENT2")"
+pass 'Both clients received valid CSRF forms'
+
+post_wrong() {
+  local client="$1" csrf="$2" email="$3" expected="$4" actual
+  actual="$(docker exec "$client" curl -k -sS --max-time 15 \
+    -D /tmp/a33-response.headers -o /dev/null -w '%{http_code}' \
+    -b /tmp/a33-cookies -c /tmp/a33-cookies \
+    -A 'Mozilla/5.0 A33-local-test' -H 'Host: localhost' \
+    -H 'Origin: https://localhost' --referer https://localhost/login/ \
+    --data-urlencode "email=$email" \
+    --data-urlencode 'password=wrong-a33-synthetic' \
+    --data-urlencode "csrfmiddlewaretoken=$csrf" \
+    https://gateway/doLogin/)" || fail 'POST failed at transport level'
+  [[ "$actual" == "$expected" ]] ||
+    fail "Unexpected POST code for client $client: expected $expected got $actual"
+  if docker exec "$client" grep -qiE \
+    '^X-Login-(Status|Accounting|Alert):' /tmp/a33-response.headers; then
+    fail 'Internal accounting headers leaked to client'
   fi
-  echo "PASS: Exactly 5 authentication responses, 3 blocked; no internal header leakage"
-  blocked=$(curl -k -sS --max-time 10 -H "Host: localhost" \
-    -o /dev/null -w "%{http_code}" https://gateway/login/)
-  echo "GET /login/ after lockout: $blocked"
-  [ "$blocked" = 403 ] || exit 1
-'
+}
 
-sleep 2
-count=$(redis GET "brute_force:fail:$IP")
-lockout=$(redis GET "brute_force:lockout:$IP")
-blacklist=$(redis GET "blacklist:$IP")
-active=$(redis ZCARD "bf:v2:active:$IP")
-history=$(redis GET "brute_force:history:$IP")
-history_count=$(awk -F, '{print NF}' <<< "$history")
+for i in 1 2 3 4 5 6; do
+  post_wrong "$CLIENT1" "$CSRF1" "$EMAIL_A" 302
+done
+post_wrong "$CLIENT1" "$CSRF1" "$EMAIL_A" 429
+pass 'Repeated guesses on one account/source enter bounded backoff, not IP ban'
 
-echo "=== REDIS CHECK (test IP only) ==="
-echo "failed counter: $count (expected 5)"
-echo "lockout: $lockout (expected 1)"
-echo "blacklist: $blacklist (expected 1)"
-echo "active reservations: $active (expected 0)"
-echo "history events: $history_count (expected 5)"
-[[ "$count" == 5 && "$lockout" == 1 && "$blacklist" == 1 && \
-   "$active" == 0 && "$history_count" == 5 ]] || exit 1
+GET_AFTER_BACKOFF="$(docker exec "$CLIENT1" curl -k -sS --max-time 10 \
+  -A 'Mozilla/5.0 A33-local-test' -H 'Host: localhost' \
+  -o /dev/null -w '%{http_code}' https://gateway/login/)"
+[[ "$GET_AFTER_BACKOFF" == 200 ]] || fail 'Account backoff blocked the shared login page'
+pass 'Account backoff does not close the shared NAT login page'
 
-echo "PASS: Redis accounting and block state are consistent"
+post_wrong "$CLIENT1" "$CSRF1" "$EMAIL_B" 302
+pass 'Different account identifier on same NAT IP reaches Django independently'
+
+post_wrong "$CLIENT2" "$CSRF2" "$EMAIL_A" 302
+pass 'Same account across a second IP contributes to shared account telemetry'
+
+ACCT_KEY="$("${TEST[@]}" exec -T app python -c \
+  'from docappsystem.login_accounting import LoginAccounting;import sys;print(LoginAccounting()._keys(sys.argv[1],sys.argv[2],"unused")[0])' \
+  "$IP1" "$EMAIL_A" | tr -d '\r\n')"
+PAIR1="$("${TEST[@]}" exec -T app python -c \
+  'from docappsystem.login_accounting import LoginAccounting;import sys;print(LoginAccounting()._keys(sys.argv[1],sys.argv[2],"unused")[1])' \
+  "$IP1" "$EMAIL_A" | tr -d '\r\n')"
+PAIR2="$("${TEST[@]}" exec -T app python -c \
+  'from docappsystem.login_accounting import LoginAccounting;import sys;print(LoginAccounting()._keys(sys.argv[1],sys.argv[2],"unused")[1])' \
+  "$IP2" "$EMAIL_A" | tr -d '\r\n')"
+[[ $(redis GET "$ACCT_KEY") == 7 ]] || fail 'Global account failure count != 7'
+[[ $(redis GET "$PAIR1") == 6 ]] || fail 'First source pair count != 6'
+[[ $(redis GET "$PAIR2") == 1 ]] || fail 'Second source pair count != 1'
+pass 'One account is correlated across two IPs with distinct pair counters'
+
+for ip in "$IP1" "$IP2"; do
+  [[ $(redis EXISTS "blacklist:$ip" "brute_force:lockout:$ip" \
+     "risk:v1:$ip" "brute_force:fail:$ip") == 0 ]] ||
+    fail 'Legacy IP punishment or duplicate legacy timer was triggered'
+done
+pass 'V3 writes no IP ban, reputation, lockout or legacy failed-login counter'
+
+[[ $(redis SISMEMBER blacklist_ips "$IP1") == 0 && \
+   $(redis SISMEMBER blacklist_ips "$IP2") == 0 ]] ||
+  fail 'Manual ban set was modified'
+pass 'Manual blacklist remained untouched'
