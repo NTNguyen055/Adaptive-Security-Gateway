@@ -2,6 +2,7 @@
 -- No Redis, ngx.exit, HTTP header/body writes, Telegram or blacklist writes.
 -- Gateway module calls and their pcall return values must remain unchanged.
 local adapter = require "security_signal_adapter"
+local correlator = require "security_correlator"
 local M = {}
 local unpack = table.unpack or unpack
 local modules = {}
@@ -114,14 +115,18 @@ end
 -- Called once per request from log_by_lua_block, including ngx.exit early exits.
 function M.log()
     local state = ngx.ctx.asg_security_shadow
+
     if not state then return end
+
     ngx.ctx.asg_security_shadow = nil
+
     local ok, err = pcall(function()
         local legacy_reason = ngx.var.log_security_reason
         -- A previously denied request legitimately short-circuits later modules.
         -- Do not treat "not reached" as a missing mandatory control, but keep
         -- the report explicitly partial. On a clean path, missing JWT/WAF is 503.
         local skipped_required = false
+
         if state.ctx.security.block == true then
             for name in pairs(state.trace.required) do
                 if not state.trace.seen[name] then
@@ -130,18 +135,60 @@ function M.log()
                 end
             end
         end
+
         local report, problem = adapter.finish(state.trace, state.ctx)
         if not report then
             log_error("adapter_finish_failed: " .. tostring(problem))
             return
         end
+
+        if (os.getenv("SECURITY_CORRELATOR_SHADOW_ENABLED") or "false"):lower() == "true" then
+            local call_ok, summary, correlation_err = pcall(
+                correlator.observe,
+                {
+                    trace = state.trace,
+                    peer_ip = ngx.var.remote_addr,
+                    request_id = ngx.var.request_id,
+
+                    -- Missing downstream JWT due to a confirmed WAF block does
+                    -- not invalidate the WAF observation itself.
+                    -- Only a completed, correctly attributed WAF step is eligible.
+                    partial = state.instrumentation_error ~= nil
+                        or state.trace.required_control_failed == true
+                        or #report.errors > 0
+                        or state.trace.seen.waf_sqli_xss ~= true,
+                }
+            )
+
+            if not call_ok then
+                log_error("correlator_crashed")
+
+            elseif not summary then
+                log_error(
+                    "correlator_error: " .. tostring(correlation_err)
+                )
+
+            elseif summary.notify then
+                ngx.log(
+                    ngx.WARN,
+                    "[SECURITY_CORRELATOR] status=SUSPICIOUS_SHADOW",
+                    " events=", summary.event_count,
+                    " windows=", summary.distinct_windows,
+                    " classes=", summary.distinct_attack_classes,
+                    " automatic_ban=disabled"
+                )
+            end
+        end
+
         local policy = report.policy
         local old_action, old_status = report.legacy_action, report.legacy_status
+
         if state.prelogin == "locked" then
             old_action, old_status = "BLOCK_REQUEST", 403
         elseif state.prelogin == "unavailable" then
             old_action, old_status = "UNAVAILABLE", 503
         end
+
         local status_diff = (old_status ~= policy.http_status)
         local action_diff = (old_action ~= policy.action)
         -- Some legacy reasons (risk_block/risk_limit/other) have no deterministic
@@ -160,11 +207,14 @@ function M.log()
         for module in pairs(state.trace.required) do
             if not state.trace.seen[module] then partial = true end
         end
+
         local has_error = state.instrumentation_error ~= nil or #report.errors > 0
         local verbose = (os.getenv("SECURITY_SHADOW_LOG_ALL") or "false"):lower() == "true"
+
         if not (verbose or status_diff or action_diff or reason_diff or has_error or unmapped) then
             return
         end
+
         local final_http = tonumber(ngx.status) or 0
 
         local error_codes = {}
@@ -199,6 +249,7 @@ function M.log()
             " final_http=", final_http
         )
     end)
+
     if not ok then log_error(err) end
 end
 

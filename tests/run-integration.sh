@@ -152,6 +152,9 @@ if [[ "$MODE" == http || "$MODE" == core || "$MODE" == all ]]; then
   ((count+=1))
   run_one "HTTP blacklist lifecycle" nginx/tests/test_blacklist_http_live.sh
   ((count+=1))
+  run_one "Authorized IP ban persistence and HTTP lifecycle" \
+  nginx/tests/test_authorized_ban_live.sh
+  ((count+=1))
   run_one "Structured security JSON access logs" nginx/tests/test_security_json_live.sh
   ((count+=1))
 fi
