@@ -122,6 +122,7 @@ pass "Django login form and CSRF token are available through OpenResty"
 
 post_invalid_login() {
   local status
+  local email="${1:-$TEST_EMAIL}"
   status="$(docker exec "$CLIENT" curl -k -sS --max-time 12 \
     -D /tmp/asg-bruteforce-response.headers \
     -o /tmp/asg-bruteforce-response.body \
@@ -130,7 +131,7 @@ post_invalid_login() {
     -A "$TEST_AGENT" -H 'Host: localhost' \
     -H 'Origin: https://localhost' \
     --referer https://localhost/login/ \
-    --data-urlencode "email=${TEST_EMAIL}" \
+    --data-urlencode "email=${email}" \
     --data-urlencode "password=${TEST_PASSWORD}" \
     --data-urlencode "csrfmiddlewaretoken=${CSRF_TOKEN}" \
     https://gateway/doLogin/)" || fail "POST /doLogin/ curl request failed"
@@ -155,74 +156,60 @@ wait_for_counter() {
   fail "Redis failed-attempt counter did not reach ${expected}; last value=${actual:-nil}"
 }
 
-wait_for_key() {
-  local key="$1" label="$2" attempt
-  for attempt in {1..30}; do
-    [[ "$(redis_cli EXISTS "$key")" == "1" ]] && {
-      pass "$label"
-      return 0
-    }
-    sleep 0.2
-  done
-  fail "Timed out waiting for Redis key: $key"
-}
-
+# NAT-aware login protection integration.
 for attempt in 1 2 3 4 5; do
   post_invalid_login
-  pass "Failed login ${attempt}/5 returned HTTP 302 without leaking internal headers"
+
+  pass "Failed login ${attempt}/5 returned HTTP 302"
+
   wait_for_counter "$attempt"
-  pass "Redis failed-attempt counter reached ${attempt}/5"
+
+  pass "Redis telemetry reached ${attempt}/5"
 done
 
-wait_for_key "$LOCKOUT_KEY" "Redis lockout key created on fifth failure"
-wait_for_key "$BLACKLIST_KEY" "Automatic blacklist key created on fifth failure"
+assert_no_ip_punishment() {
+  local count
 
-LOCKOUT_TTL="$(redis_cli TTL "$LOCKOUT_KEY")"
-BLACKLIST_TTL="$(redis_cli TTL "$BLACKLIST_KEY")"
-[[ "$LOCKOUT_TTL" =~ ^[0-9]+$ ]] && (( LOCKOUT_TTL > 0 && LOCKOUT_TTL <= 3600 )) ||
-  fail "Invalid lockout TTL: $LOCKOUT_TTL"
-[[ "$BLACKLIST_TTL" =~ ^[0-9]+$ ]] && (( BLACKLIST_TTL > 0 && BLACKLIST_TTL <= 3600 )) ||
-  fail "Invalid automatic blacklist TTL: $BLACKLIST_TTL"
-pass "Lockout and automatic blacklist have positive bounded TTLs"
+  count="$(redis_cli EXISTS \
+    "$LOCKOUT_KEY" \
+    "$BLACKLIST_KEY" \
+    "$RISK_KEY" \
+    "$RISK_STAMP_KEY")"
 
-RISK_SCORE="$(redis_cli GET "$RISK_KEY")"
-python - "$RISK_SCORE" <<'PYTHON' || fail "Risk Engine reputation score is missing or below 80"
-import sys
-try:
-    score = float(sys.argv[1])
-except (ValueError, IndexError):
-    raise SystemExit(1)
-if score < 80:
-    raise SystemExit(1)
-print(f"PASS  Redis reputation score reached {score:g} (>= 80)")
-PYTHON
+  [[ "$count" == "0" ]] ||
+    fail "Login failures created unauthorized IP punishment keys"
 
-# Pre-login protection must reject the next request before it reaches Django.
-NEXT_STATUS="$(docker exec "$CLIENT" curl -k -sS --max-time 10 \
-  -A "$TEST_AGENT" -H 'Host: localhost' \
-  -o /dev/null -w '%{http_code}' https://gateway/login/)" ||
-  fail "Gateway request after lockout failed at transport level"
-[[ "$NEXT_STATUS" == "403" ]] ||
-  fail "Expected next GET /login/ to be blocked with HTTP 403, received $NEXT_STATUS"
-pass "Next GET /login/ is blocked by Gateway with HTTP 403"
+  [[ "$(redis_cli SISMEMBER blacklist_ips "$TEST_IP")" == "0" ]] ||
+    fail "Manual blacklist was modified unexpectedly"
+}
 
-# Also prove the actual login POST is rejected before Django and does not
-# increment the already-locked counter again.
-BLOCKED_POST_STATUS="$(docker exec "$CLIENT" curl -k -sS --max-time 10 \
-  -o /dev/null -w '%{http_code}' \
-  -b /tmp/asg-bruteforce-cookies -c /tmp/asg-bruteforce-cookies \
-  -A "$TEST_AGENT" -H 'Host: localhost' \
-  -H 'Origin: https://localhost' --referer https://localhost/login/ \
-  --data-urlencode "email=${TEST_EMAIL}" \
-  --data-urlencode "password=${TEST_PASSWORD}" \
-  --data-urlencode "csrfmiddlewaretoken=${CSRF_TOKEN}" \
-  https://gateway/doLogin/)" ||
-  fail "Locked POST /doLogin/ failed at transport level"
-[[ "$BLOCKED_POST_STATUS" == "403" ]] ||
-  fail "Expected locked POST /doLogin/ HTTP 403, received $BLOCKED_POST_STATUS"
-sleep 0.5
-[[ "$(redis_cli GET "$FAIL_KEY")" == "5" ]] ||
-  fail "Blocked request unexpectedly changed the failed-attempt counter"
-pass "Locked POST /doLogin/ is blocked before Django; counter remains exactly 5"
+assert_no_ip_punishment
+pass "Five login failures created no IP lockout or blacklist"
 
-printf '\nBrute-force login live tests: %d passed, 0 failed\n' "$PASSED"
+# Same NAT IP must still be able to visit the login page.
+LOGIN_AFTER_FAILURES="$(
+  docker exec "$CLIENT" curl -k -sS --max-time 10 \
+    -A "$TEST_AGENT" \
+    -H 'Host: localhost' \
+    -o /dev/null \
+    -w '%{http_code}' \
+    https://gateway/login/
+)" || fail "GET /login/ failed after fifth attempt"
+
+[[ "$LOGIN_AFTER_FAILURES" == "200" ]] ||
+  fail "Expected GET /login/ HTTP 200, got $LOGIN_AFTER_FAILURES"
+
+pass "Login page remains available after failure threshold"
+
+# Different account identifier sharing the same disposable IP.
+SECOND_EMAIL="asg-second-${$}-$(date +%s)@example.invalid"
+
+post_invalid_login "$SECOND_EMAIL"
+
+wait_for_counter 6
+assert_no_ip_punishment
+
+pass "Second account on same NAT IP was not locked out"
+
+printf '\nNAT-aware brute-force live tests: %d passed, 0 failed\n' \
+  "$PASSED"

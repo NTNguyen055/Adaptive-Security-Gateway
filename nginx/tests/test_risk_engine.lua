@@ -198,5 +198,50 @@ run_case("CAS conflict reloads reputation before a second write", function()
     check(not ctx.security.redis_risk_error, "successful retry marked as failure")
 end)
 
+run_case("shared NAT login history cannot amplify IP risk", function()
+    kv["brute_force:history:" .. ip] = "100:5,90:6,80:7"
+
+    local ctx = {
+        security = {
+            client_ip = ip,
+            risk = 10,
+            bad_bot_scanner = true,
+            signals = {"bad_bot_scanner"},
+        },
+    }
+
+    risk_engine.run(ctx)
+
+    check(
+        ctx.security.risk_final == 20,
+        "Login failure history increased shared-IP risk"
+    )
+
+    check(
+        kv["blacklist:" .. ip] == nil,
+        "Login history caused an automatic IP ban"
+    )
+end)
+
+run_case("brute-force signal alone cannot punish IP", function()
+    local ctx = {
+        security = {
+            client_ip = ip,
+            risk = 25,
+            brute_force_attack = true,
+            signals = {"brute_force_attack"},
+        },
+    }
+
+    risk_engine.run(ctx)
+
+    check(
+        ctx.security.risk_action == "pass",
+        "Login-failure signal unexpectedly punished the IP"
+    )
+
+    no_reputation_or_blacklist()
+end)
+
 print(string.format("Risk Engine mock tests: %d passed, %d failed, %d total", passed, failed, passed + failed))
 if failed > 0 then os.exit(1) end

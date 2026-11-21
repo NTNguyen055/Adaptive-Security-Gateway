@@ -26,18 +26,19 @@ end
 
 local MAX_RISK = 100
 
--- Time-bounded IP reputation and automatic blocks (local baseline).
--- Automatic blocks must not populate the persistent manual-ban set.
+-- Time-bounded IP reputation only.
+-- Risk Engine cannot issue automatic IP bans.
+-- Manual blacklist and automatic ban authorization are separate.
 local REPUTATION_TTL_NORMAL = 3600       -- 1 hour
 local REPUTATION_TTL_ELEVATED = 7200     -- 2 hours
 local AUTOMATIC_BLOCK_TTL = 900         -- 15 minutes
 local REPUTATION_DECAY_PERIOD = 300       -- 5 minutes
 
--- Compare-and-swap: check the exact snapshot read by this request before
--- committing score, timestamp, and auto-ban in one EVAL.  A conflicting
--- concurrent request returns 0; the caller MUST reload and recompute.
--- This prevents silent lost updates while retaining the existing scoring code.
--- Redis scripts are atomic in execution/visibility, but not rollback-on-error.
+-- Atomic Redis reputation compare-and-swap.
+-- Checks score, timestamp and brute-force history snapshots.
+-- Legacy KEYS/ARGV positions remain for compatibility.
+-- write_ban must always be 0; no blacklist writes are permitted.
+-- Redis Lua execution is atomic, but does not roll back on errors.
 local WRITE_REPUTATION_SCRIPT = [[
 local score_key = KEYS[1]
 local seen_key = KEYS[2]
@@ -121,7 +122,6 @@ end
 -- Mỗi khi các module trước (WAF, Bot, Geo, Brute-force) phát hiện bất thường,
 -- chúng không chặn ngay mà gắn "signal" vào Request. Risk Engine sẽ tổng hợp ở đây.
 local SIGNAL_BONUS = {
-
     -- XFF
     xff_private_client = 5,
     xff_private_chain  = 25,
@@ -149,9 +149,6 @@ local SIGNAL_BONUS = {
 
     -- Geo
     geo_block          = 5,
-
-    -- Brute force
-    brute_force_attack = 30,
 }
 
 -- ============================================================
@@ -210,7 +207,6 @@ function _M.run(ctx)
         or ctx.security.bad_bot_scanner
         or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
-        or ctx.security.brute_force_attack
 
     if ctx.security.jwt_missing and not independent_abuse then
         ctx.security.block = true
@@ -241,7 +237,6 @@ function _M.run(ctx)
         or ctx.security.waf_xss
         or ctx.security.bad_bot_scanner
         or ctx.security.bad_bot_headless
-        or ctx.security.brute_force_attack
         or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
         or ctx.security.xff_malformed
@@ -397,8 +392,9 @@ function _M.run(ctx)
         end
 
         -- =========================================================================
-        -- BRUTE-FORCE REPUTATION TRACKING
-        -- Kiểm tra lịch sử brute-force để accumulate risk across windows
+        -- BRUTE-FORCE HISTORY CAS SNAPSHOT
+        -- Read history only to detect concurrent Redis modifications.
+        -- Never derive shared-IP risk penalties from failed logins.
         -- =========================================================================
         local bf_history_key = "brute_force:history:" .. ip
         local bf_history, bf_err = red:get(bf_history_key)
@@ -409,34 +405,9 @@ function _M.run(ctx)
             return
         end
 
-        -- Liên kết dữ liệu chéo module: Đọc lịch sử từ module Brute-force.
-        -- Nếu IP này có "tiền án" (high_risk_count > 0) thì đè thêm điểm phạt nặng hơn vào Risk tổng.
-        if bf_history and bf_history ~= ngx.null then
-            -- Parse history và count high-risk attempts
-            local high_risk_count = 0
-            for entry in bf_history:gmatch("[^,]+") do
-                local _, attempt = entry:match("^([^:]+):(%d+)$")
-                if attempt and tonumber(attempt) >= 5 then
-                    high_risk_count = high_risk_count + 1
-                end
-            end
-
-            -- Nếu có lịch sử brute-force >= 5 lần, tăng penalty thêm
-            if high_risk_count > 0 then
-                local persistent_penalty = high_risk_count * 15
-                final_risk = math_min(final_risk + persistent_penalty, MAX_RISK)
-                ngx.log(ngx.WARN, "[RISK] Brute-force history detected for IP ", ip,
-                        " - high_risk_count=", high_risk_count,
-                        " - additional_penalty=", persistent_penalty)
-            end
-        end
-
-        -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
-        -- Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
-        -- Nếu reputation đã đạt ngưỡng block, không cộng thêm momentum
-        if base_risk > 50 and reputation < cfg.block_threshold then
-            final_risk = math_min(final_risk + 10, MAX_RISK)
-        end
+        -- Brute-force history remains a Redis CAS snapshot only.
+        -- Shared-IP login failures are not IP reputation evidence.
+        -- Do not add a persistent penalty from this history.
 
         -- =========================================================================
         -- TỐI ƯU HÓA REDIS WRITE I/O
