@@ -1,11 +1,11 @@
 # P0.3 — CSRF & Authentication Request Security
 ## Báo cáo nghiệm thu kỹ thuật (Local Security Lab)
 
-**Dự án:** AdaptiveSecurityGW + Machine Learning for Layer 7  
-**Nhánh phát triển:** `feature/p0-security-baseline`  
-**Ngày kiểm thử:** 2026-11-22 (Asia/Ho_Chi_Minh)  
-**Phiên bản/commit được nghiệm thu:** `PENDING_COMMIT_HASH`  
-**Trạng thái:** **TECHNICAL TESTS PASS — FORMAL ACCEPTANCE PENDING SOURCE/DIFF AUDIT & GIT CHECKPOINT**  
+**Dự án:** AdaptiveSecurityGW + Machine Learning for Layer 7
+**Nhánh phát triển:** `feature/p0-security-baseline`
+**Ngày kiểm thử:** 2026-11-22 (Asia/Ho_Chi_Minh)
+**Phiên bản/commit được nghiệm thu:** `PENDING_COMMIT_HASH`
+**Trạng thái:** **TECHNICAL TESTS PASS — FORMAL ACCEPTANCE PENDING SOURCE/DIFF AUDIT & GIT CHECKPOINT**
 **Môi trường:** Docker Compose local; HTTPS `https://localhost` qua OpenResty; Django; MySQL; Redis. Không sử dụng staging/production.
 
 > Báo cáo tổng hợp những kết quả người thực hiện đã cung cấp qua terminal. Không có tuyên bố rằng bên review trực tiếp chạy Docker trên máy người thực hiện. Số lượng Django regression đã bao gồm các bộ unit test thành phần; không cộng lặp để quảng bá thành số test độc lập.
@@ -107,7 +107,7 @@ Gợi ý cấu trúc checkpoint:
 2. Commit P0.2 docs/maintenance riêng (sau review): `SECURITY_CORRELATOR.md`, `Ke_hoach_tong_the_ASG_ML.md`, `P0_2_SECURITY_ACCEPTANCE_2026-11-21.md`, script rename.
 3. Push nhánh `feature/p0-security-baseline` sau khi xác minh chỉ có các commit mong muốn.
 
-**Commit hash:** `PENDING_COMMIT_HASH`  
-**Git remote:** `PENDING_REMOTE_VERIFICATION`  
-**Người nghiệm thu:** `PENDING_USER_REVIEW`  
+**Commit hash:** `PENDING_COMMIT_HASH`
+**Git remote:** `PENDING_REMOTE_VERIFICATION`
+**Người nghiệm thu:** `PENDING_USER_REVIEW`
 **Kết luận cuối:** **PENDING FINAL AUDIT**. Các tiêu chí kiểm thử kỹ thuật đã đạt trong phạm vi Local Security Lab.
