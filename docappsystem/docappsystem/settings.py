@@ -57,7 +57,11 @@ ALLOWED_HOSTS = [
 # ============================================================
 # CSRF / DOMAIN TRUST
 # ============================================================
-CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS]
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in get_env("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 CSRF_COOKIE_SECURE   = True
 CSRF_COOKIE_HTTPONLY = True
@@ -78,8 +82,8 @@ SESSION_SAVE_EVERY_REQUEST = False
 # ============================================================
 # PROXY (OPENRESTY)
 # ============================================================
-USE_X_FORWARDED_HOST    = True
-USE_X_FORWARDED_PORT    = True
+USE_X_FORWARDED_HOST = False
+USE_X_FORWARDED_PORT = False
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ============================================================

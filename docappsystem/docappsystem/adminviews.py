@@ -5,7 +5,11 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect, get_object_or_404
-from django.views.decorators.http import require_POST, require_http_methods
+from django.views.decorators.http import (
+    require_POST,
+    require_http_methods,
+    require_safe,
+)
 
 from dasapp.models import (
     CustomUser,
@@ -18,6 +22,7 @@ from dasapp.models import (
 from .permissions import admin_required
 
 @admin_required
+@require_safe
 def ADMINHOME(request):
     doctor_count = DoctorReg.objects.all().count
     specialization_count = Specialization.objects.all().count
@@ -45,6 +50,7 @@ def SPECIALIZATION(request):
     return redirect("add_specilizations")
 
 @admin_required
+@require_safe
 def MANAGESPECIALIZATION(request):
     specialization = Specialization.objects.all()
     context = {'specialization':specialization,
@@ -78,7 +84,8 @@ def DELETE_SPECIALIZATION(request, id):
     return redirect("manage_specilizations")
 
 @admin_required
-def UPDATE_SPECIALIZATION(request,id):
+@require_safe
+def UPDATE_SPECIALIZATION(request, id):
     specialization = Specialization.objects.get(id=id)
     
     context = {
@@ -119,6 +126,7 @@ def UPDATE_SPECIALIZATION_DETAILS(request):
     return redirect("manage_specilizations")
 
 @admin_required
+@require_safe
 def DoctorList(request):
     doctorlist = DoctorReg.objects.all()
     context = {'doctorlist':doctorlist,
@@ -127,6 +135,7 @@ def DoctorList(request):
     return render(request,'admin/doctor-list.html',context)
 
 @admin_required
+@require_safe
 def ViewDoctorDetails(request,id):
     doctorlist1=DoctorReg.objects.filter(id=id)
     context={'doctorlist1':doctorlist1
@@ -136,6 +145,7 @@ def ViewDoctorDetails(request,id):
     return render(request,'admin/doctor-details.html',context)
 
 @admin_required
+@require_safe
 def ViewDoctorAppointmentList(request,id):
     patientdetails=Appointment.objects.filter(doctor_id=id)
     context={'patientdetails':patientdetails
@@ -145,6 +155,7 @@ def ViewDoctorAppointmentList(request,id):
     return render(request,'admin/doctor_appointment_list.html',context)
 
 @admin_required
+@require_safe
 def ViewPatientDetails(request,id):
     patientdetails=Appointment.objects.filter(id=id)
     context={'patientdetails':patientdetails
@@ -154,6 +165,7 @@ def ViewPatientDetails(request,id):
     return render(request,'admin/patient_appointment_details.html',context)
 
 @admin_required
+@require_http_methods(["GET"])
 def Search_Doctor(request):
     if request.method == "GET":
         query = request.GET.get('query', '')
@@ -167,6 +179,7 @@ def Search_Doctor(request):
             return render(request, 'admin/search-doctor.html', {})
 
 @admin_required
+@require_safe
 def Doctor_Between_Date_Report(request):
     start_date = request.GET.get('start_date')
     end_date = request.GET.get('end_date')
@@ -187,6 +200,7 @@ def Doctor_Between_Date_Report(request):
     return render(request, 'admin/doctor-between-date.html', {'doctor': doctor,'start_date':start_date,'end_date':end_date})
 
 @admin_required
+@require_safe
 def WEBSITE_UPDATE(request):
     page = Page.objects.all()
     context = {"page":page,

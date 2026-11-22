@@ -4,10 +4,16 @@ import random
 from datetime import datetime
 from django.contrib import messages
 from django.http import HttpResponseForbidden
+from django.views.decorators.http import (
+    require_http_methods,
+    require_safe,
+)
 
+@require_safe
 def USERBASE(request):
     return render(request, "userbase.html", {})
 
+@require_safe
 def Index(request):
     doctorview = DoctorReg.objects.all()
     page = Page.objects.all()
@@ -17,6 +23,7 @@ def Index(request):
     }
     return render(request, 'index.html',context)
 
+@require_http_methods(["GET", "POST"])
 def create_appointment(request):
     doctorview = DoctorReg.objects.all()
     page = Page.objects.all()
@@ -69,6 +76,7 @@ def create_appointment(request):
     'page':page}
     return render(request, 'appointment.html', context)
 
+@require_safe
 def User_Search_Appointments(request):
     query = request.GET.get("query", "").strip()
 

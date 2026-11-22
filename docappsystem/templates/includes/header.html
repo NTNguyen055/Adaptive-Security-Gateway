@@ -51,7 +51,12 @@
             </div>
                <a class="dropdown-item" href="{% url 'profile' %}">Hồ sơ cá nhân</a>
                <a class="dropdown-item" href="{% url 'change_password' %}">Cài đặt</a>
-               <a class="dropdown-item" href="{% url 'logout' %}">Đăng xuất</a>
+               <form action="{% url 'logout' %}" method="post">
+                  {% csrf_token %}
+                  <button type="submit" class="dropdown-item">
+                     Đăng xuất
+                  </button>
+               </form>
          </div>
       </li>
     </ul>
@@ -90,7 +95,12 @@
             </div>
             <a class="dropdown-item" href="{% url 'profile' %}">Hồ sơ cá nhân</a>
             <a class="dropdown-item" href="{% url 'change_password' %}">Cài đặt</a>
-            <a class="dropdown-item" href="{% url 'logout' %}">Đăng xuất</a>
+            <form action="{% url 'logout' %}" method="post">
+               {% csrf_token %}
+               <button type="submit" class="dropdown-item">
+                  Đăng xuất
+               </button>
+            </form>
          </div>
       </li>
    </ul>

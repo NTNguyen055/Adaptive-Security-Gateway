@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.http import JsonResponse
-from django.views.decorators.http import require_http_methods
+from django.views.decorators.http import require_http_methods, require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.db import connection, transaction
 from django.views.generic import RedirectView
@@ -65,7 +65,13 @@ urlpatterns = [
      path("doLogin/", views.doLogin, name="doLogin"),
 
      # Logout: Sử dụng built-in của Django để xóa Session sạch sẽ
-     path("logout/",  auth_views.LogoutView.as_view(next_page='login'), name="logout"),
+     path(
+          "logout/",
+          require_POST(
+               auth_views.LogoutView.as_view(next_page="login")
+          ),
+          name="logout",
+     ),
 
      # Điều hướng favicon.ico về thư mục static
      path("favicon.ico", RedirectView.as_view(url='/static/favicon.ico', permanent=True)),

@@ -7,7 +7,11 @@ from dasapp.models import CustomUser
 from django.contrib.auth import get_user_model
 from django.contrib.auth.forms import PasswordChangeForm
 from django.contrib.auth import update_session_auth_hash
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import (
+    require_POST,
+    require_http_methods,
+    require_safe,
+)
 
 import logging
 
@@ -21,11 +25,13 @@ logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
+@require_safe
 def BASE(request):
     return render(request,'base.html')
 
+@require_safe
 def LOGIN(request):
-    return render(request,'login.html')
+    return render(request, 'login.html')
 
 def doLogout(request):
     logout(request)
@@ -206,6 +212,7 @@ def doLogin(request):
     return response
 
 @login_required(login_url="/login/")
+@require_safe
 def PROFILE(request):
     return render(
         request,
@@ -240,6 +247,7 @@ def PROFILE_UPDATE(request):
     return render(request, 'profile.html')
 
 @login_required(login_url="/login/")
+@require_http_methods(["GET", "POST"])
 def CHANGE_PASSWORD(request):
     if request.method == "POST":
         form = PasswordChangeForm(
