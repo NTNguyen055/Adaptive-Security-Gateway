@@ -1,13 +1,13 @@
 # KẾ HOẠCH TRIỂN KHAI TỔNG THỂ ĐỒ ÁN TỐT NGHIỆP
 
-**Đề tài:** Nghiên cứu giải pháp Adaptive Security Gateway phòng chống tấn công lớp 7 dựa trên OpenResty và Machine Learning  
-**English:** Research on an Adaptive Security Gateway Solution for Defending Against Layer 7 Attacks Based on OpenResty and Machine Learning  
-**Phiên bản kế hoạch:** 2.0 — cập nhật ngày 18/11/2026  
-**Repository tham chiếu:** https://github.com/NTNguyen055/Adaptive-Security-Gateway  
-**Nhánh đang phát triển:** `feature/p0-security-baseline` (local, tạo từ `develop`, chưa commit/push tại thời điểm cập nhật).  
+**Đề tài:** Nghiên cứu giải pháp Adaptive Security Gateway phòng chống tấn công lớp 7 dựa trên OpenResty và Machine Learning
+**English:** Research on an Adaptive Security Gateway Solution for Defending Against Layer 7 Attacks Based on OpenResty and Machine Learning
+**Phiên bản kế hoạch:** 2.2 — cập nhật ngày 22/11/2026 (đối chiếu nghiệm thu P0.3 và hồ sơ P0.2)
+**Repository tham chiếu:** https://github.com/NTNguyen055/Adaptive-Security-Gateway
+**Nhánh đang phát triển:** `feature/p0-security-baseline`; **checkpoint P0.2:** `4e7b350` (21/11/2026); **checkpoint source/test P0.3:** `b510488` (22/11/2026); **remote HEAD đã đối chiếu:** `7c51a35` (22/11/2026, báo cáo P0.3 hoàn thiện). Đây là các **feature checkpoints**, chưa phải merge `develop`/`main`.
 **Nguyên tắc:** Chủ dự án tự sửa mã nguồn, kiểm thử, commit và merge; trợ lý chỉ đọc/review mã nguồn GitHub và đưa đề xuất.
 
-> **Quy tắc trạng thái:** `PASS` = đã có output kiểm thử được cung cấp; `CODE` = xác nhận mã nguồn hiện diện nhưng chưa đủ bằng chứng vận hành/ nghiệm thu; `REPORTED` = đã được báo cáo từ giai đoạn trước, chưa kiểm chứng lại trong lần cập nhật này; `OPEN` = chưa nghiệm thu; `PLANNED` = định hướng chưa triển khai. Không đồng nhất có code với đã PASS.
+> **Quy tắc trạng thái:** `PASS` = đã có output kiểm thử phù hợp phạm vi được nêu; `TECHNICAL PASS (LOCAL/SHADOW)` = nghiệm thu kỹ thuật trong local, không suy rộng sang production; `FORMAL PENDING` = còn việc đóng hồ sơ/bằng chứng; `CODE` = có source nhưng chưa có đủ chứng cứ vận hành; `REPORTED` = kết quả lịch sử chưa kiểm chứng lại; `OPEN` = chưa nghiệm thu; `PLANNED` = chưa triển khai. Không coi commit, cấu hình hoặc điểm Risk là bằng chứng phát hành ban IP tự động thành công.
 
 ## I. TÓM TẮT ĐIỀU HÀNH VÀ MỤC TIÊU NGHIÊN CỨU
 
@@ -25,9 +25,9 @@ Kế hoạch **giữ 4 giai đoạn lớn của tài liệu gốc (29/10/2026)**
 
 ### I.1. Bản đồ 4 giai đoạn và 6 workstream
 
-| Giai đoạn gốc | Workstream | Trọng tâm | Trạng thái 18/11/2026 |
+| Giai đoạn gốc | Workstream | Trọng tâm | Trạng thái cập nhật 22/11/2026 |
 |---|---|---|---|
-| GĐ1 — Rule-Based Security Baseline | **P0** | Hoàn thiện authorization, brute-force, CSRF, CI, Risk/TTL, WAF/privacy, benchmark | **Đang thực hiện; chưa đóng Baseline Ready** |
+| GĐ1 — Rule-Based Security Baseline | **P0** | Authorization, NAT-aware login security, authorized ban/correlator shadow, CSRF, CI, Risk/TTL, WAF/privacy, benchmark | **P0.1 PASS; P0.2 TECHNICAL PASS (LOCAL/SHADOW), FORMAL PENDING; P0.3 LOCAL TECHNICAL ACCEPTANCE PASS; P0.4–P0.8 OPEN; chưa Baseline Ready** |
 | GĐ2 — AWS Deployment & Operations | **P1** | Rà soát tình trạng triển khai, recovery, rollback, monitoring, chi phí | **Nền tảng có mã và có báo cáo vận hành; cần nghiệm thu chọn lọc** |
 | GĐ3 — ML Research & Hybrid | **P2 + P3 + P4** | Dataset/feature → training → inference + Adaptive Decision | **PLANNED; chưa có bằng chứng triển khai hoàn chỉnh** |
 | GĐ4 — Experiments & Thesis | **P5** | E1–E5; A–D + ablation; báo cáo/slide/demo | **PLANNED; có thiết kế kịch bản, chưa có kết quả cuối** |
@@ -39,75 +39,94 @@ Kế hoạch **giữ 4 giai đoạn lớn của tài liệu gốc (29/10/2026)**
 3. **Hybrid Ready:** OpenResty nhận ML signal; chế độ `off/shadow/enforce`; Adaptive Decision và fallback có test.
 4. **Research Validated:** Có số liệu A–D và đối chứng *ML có/không có Adaptive*; đồ thị, phân tích giới hạn, luận văn và demo.
 
-## II. ĐÁNH GIÁ TIẾN ĐỘ THỰC TẾ (CHỐT NGÀY 18/11/2026)
+## II. ĐÁNH GIÁ TIẾN ĐỘ THỰC TẾ (CẬP NHẬT ĐẾN NGÀY 22/11/2026)
 
 ### II.1. Thành phần đã có và bằng chứng
 
 | Nhóm | Nội dung đã thực hiện hoặc có cơ sở | Trạng thái và nguồn bằng chứng |
 |---|---|---|
-| Local development | `docker-compose.dev.yml`, `.env.local`, MySQL/Redis/Django/OpenResty local; tách dev và production; health checks | **PASS được báo cáo**: Django và Gateway healthy ngày 18/11; tài liệu local và Compose hiện diện |
-| Authorization P0.1 | Bảo vệ `PROFILE`/`CHANGE_PASSWORD`; PasswordChangeForm; update session hash; `PROFILE_UPDATE` POST-only; template; 8 authorization tests; sửa test cũ | **PASS:** 8/8 P0.1 tests và 84/84 Django regressions (18/11) |
-| P0.1 HTTP access | Anonymous `/profile/`, `/password/` chuyển HTTP 302 tới `/login/` | **PASS được báo cáo** qua `curl` local ngày 18/11; Admin/Doctor manual flow chưa xác nhận riêng |
-| P0.2.1 Login Security Signal | Test `@require_POST`, wrong/unknown/inactive credentials, Admin/Doctor success, CSRF no-login-signal | **PASS:** sau khi thêm 7 tests, **91/91 Django tests, 19.981 giây, OK** (output user cung cấp) |
-| Lua rule-based | Redis rate limiting, IP blacklist, WAF, JWT, risk scoring, brute-force, monitoring có mã nguồn | **CODE** trên nhánh GitHub `develop`; chưa thay thế bằng bằng chứng P0 cuối |
-| Lua historical test | 97/97 Lua tests và 17/17 Django isolated tests ngày 17/11/2026 | **REPORTED** từ bản rà soát trước; không cộng hoặc nhập nhằng với 91 Django tests hiện tại |
-| Jenkins / DockerHub | Pipeline build/test/push/deploy, nhánh develop/main, các smoke checks và rollback path | **CODE + REPORTED:** CI `main` success ở lần review trước; chưa chứng minh recovery/rollback thực tế hoặc CI cho P0 mới |
-| AWS / RDS / S3 / TLS | Cấu hình EC2, RDS MySQL TLS verification, S3 private media, HTTPS, monitoring đã có trong tài liệu/repo | **CODE + REPORTED:** hoạt động triển khai trước đây; cần kiểm chứng dịch vụ và recovery hiện tại, không coi hoàn thành P1 |
-| ML / Adaptive Threshold / Z-score Baseline | Trong mã OpenResty `develop` chưa tìm thấy triển khai đầy đủ `ADAPTIVE_*` hoặc `BASELINE_*`; ML pipeline/inference chưa nghiệm thu | **PLANNED**, không được báo cáo là đang chạy chỉ vì `.env` có biến |
+| Local development | Compose local, MySQL, Redis, Django, OpenResty; gateway chỉ publish `127.0.0.1:80/443` | **PASS local:** Redis/App/Gateway đều Healthy sau rollback (21/11); `LOGIN_ACCOUNTING_ENABLED=False`, Correlator Shadow `false` |
+| Authorization P0.1 | `PROFILE`/`CHANGE_PASSWORD`, form/session, `PROFILE_UPDATE` POST-only | **PASS lịch sử:** 8/8 authorization và 84/84 Django regression (18/11); một số manual role flows còn ghi nhận riêng |
+| P0.2.1 — Django login contract | POST-only, nội bộ `X-Login-Status`, xác thực thành công/thất bại | **PASS:** 91/91 Django regression (18/11); valid-account HTTP E2E bổ sung 9/9 (21/11) |
+| P0.2.2 — Gateway login integration | Exact login locations, chặn header nội bộ, canonical/trusted peer IP, kiểm tra CSRF/session qua Gateway | **TECHNICAL PASS local** theo `openresty -t`, valid-account E2E 9/9 và các HTTP tests; còn cần lưu đủ bản HTTP method/status matrix nguyên văn để đóng hồ sơ gốc |
+| P0.2.3 — NAT-aware accounting | Bỏ legacy IP-only failed-login lockout; Redis V3 account+pair counters, bounded backoff, admit/finalize atomic, HMAC pseudonyms | **TECHNICAL PASS local:** V3 isolated E2E 11/11; Redis atomic/CAS tests theo kết quả đã báo cáo; không phát hành IP ban từ thất bại đăng nhập |
+| P0.2.4 / A3.1–A3.4 | Ban authorization, Redis V2 TTL+metadata, legacy audit, Security Correlator Shadow và E2E | **TECHNICAL PASS local/shadow:** Gateway LuaJIT 145/145 (13 suites), authorized-ban HTTP 10/10, blacklist HTTP 13/13, Redis CAS 16/16, shadow 8 events/3 windows/2 classes; tự động ban từ correlator vẫn fail-closed |
+| Git checkpoint P0.2 | `feature/p0-security-baseline`; A3.3 `263ea9e`; A3.4 `4e7b350` (14 file) | **HISTORICAL CHECKPOINT:** P0.2 source tại `4e7b350` (21/11); các cập nhật tài liệu P0.2 đang được rà soát/chuẩn bị commit riêng sau P0.3, không gộp kết quả thử nghiệm giữa các SHA |
+| P0.3 — CSRF & Authentication Request Security | Origin/Referer/CSRF, logout POST-only, session, HTTP methods, RBAC Admin/Doctor, proxy trust boundary | **LOCAL TECHNICAL ACCEPTANCE PASS (22/11):** HTTP Method Inventory 16/16; Role Matrix 14/14; CSRF/Auth 20/20 (đều nằm trong Django regression 114 discovered / 102 PASS / 12 skipped); HTTPS E2E 37/37, Proxy Trust 19/19, Admin/Doctor E2E 36/36; checkpoint source/test `b510488`; tài liệu đã push tại `7c51a35` |
+| Lua historical tests | 97/97 Lua; 17/17 Django isolated (17/11) | **REPORTED lịch sử**, không cộng vào 145 tests mới |
+| Jenkins / DockerHub | CI và image workflow có trong repository | **CODE + REPORTED:** chưa có CI artifact cho tất cả thay đổi P0.2 tại SHA này; P0.4 vẫn OPEN |
+| AWS / RDS / S3 / TLS | Cấu hình hạ tầng và tài liệu vận hành trước đây | **CODE + REPORTED:** chưa nghiệm thu lại production/AWS trong phiên P0.2; P1 không được mặc định PASS |
+| ML / Adaptive | Dataset, ML inference, policy thích ứng và thí nghiệm A–D/C0/C1 | **PLANNED**, không có bằng chứng đã huấn luyện/tích hợp model từ P0.2 |
 
-**Lưu ý về mốc lịch sử:** Kế hoạch gốc ngày 29/10/2026 mô tả AWS cần khôi phục sau khi tài nguyên cũ bị gỡ; các tài liệu và báo cáo cập nhật gần 18/11 cho thấy cấu hình triển khai/CI đã tiến xa hơn. Bản này lấy **bằng chứng mới nhất** làm trạng thái làm việc nhưng vẫn yêu cầu kiểm chứng lại vận hành AWS trước khi đóng P1.
+**Nguồn nghiệm thu:** P0.2 tại `docs/P0_2_SECURITY_ACCEPTANCE_2026-11-21.md` (file local sẽ commit riêng), source/checkpoint `4e7b350`, log local 18–21/11; P0.3 tại `docs/P0_3_SECURITY_ACCEPTANCE_2026-11-22.md` và `docs/HTTP_METHOD_INVENTORY_P03.md`, source/test `b510488`, tài liệu tại `7c51a35`, log local ngày 22/11. Các báo cáo này không phải artifact do GitHub Actions/Jenkins tự sinh.
 
-### II.2. Các việc CHƯA được phép đánh dấu PASS
+**Lưu ý lịch sử:** Các tuyên bố về `develop`, AWS và IP-only lockout ở bản kế hoạch v2.0 phản ánh lần review 18/11; không được áp dụng nguyên trạng cho feature branch `4e7b350`. Bản v2.1 lấy kiến trúc NAT-aware/issuer/correlator thực tế làm cơ sở kỹ thuật mới.
 
-- **P0.2.2** patch OpenResty `/login/`, `/doLogin/` và loại bỏ header `X-Login-Status` ra client **đã được hướng dẫn nhưng chưa có kết quả `openresty -t`, HTTP/Redis integration được gửi**. Không mặc định đã sửa trên local.
-- **P0.2.3–P0.2.4** Redis counter, cooldown, concurrency và shared IP chưa có báo cáo PASS cho feature branch.
-- **P0.3–P0.8** vẫn mở. Riêng bộ 91 Django tests PASS không đồng nghĩa Jenkins đã tích hợp đầy đủ regression hoặc Security Baseline đã được chốt.
-- Phần ML Training/Inference và Adaptive Decision Engine/Z-score chưa có mã hoàn chỉnh và không có metrics thực nghiệm cuối.
+### II.2. Các phạm vi chưa được phép tuyên bố PASS / việc đóng hồ sơ
+
+- **P0.2 có TECHNICAL PASS trong local/shadow, nhưng formal closure còn cần:** commit/push tài liệu kế hoạch/Correlator và báo cáo nghiệm thu sau review; đối chiếu log HTTP method/status matrix P0.2 (đặc biệt `405/403/302`) và Redis recovery/AOF nếu là gate bắt buộc của checklist gốc. Các HTTP Method tests P0.3 không tự động thay thế log lịch sử P0.2. Không điền PASS cho thử nghiệm chưa có log tương ứng.
+- **Automatic ban từ Correlator chưa được phép bật:** `security_correlator.verify()` chủ động trả lỗi do thiếu independent confirmed-exploit verifier và NAT/CGNAT low-collateral assessment. E2E ban 10/10 dùng Redis EVAL với incident **synthetic**, chỉ chứng minh persistence/enforcement/expiry, **không** chứng minh trusted correlator issuance production.
+- **Shadow Policy mismatch 403/503** đã quan sát khi WAF chặn trước JWT; đây là độ lệch so sánh do short-circuit cần regression/phân loại, không phải khẳng định live Gateway đã trả 503.
+- **P0.3 đã đạt LOCAL TECHNICAL ACCEPTANCE PASS** tại source/test checkpoint `b510488`, với tài liệu nghiệm thu được push đến `7c51a35` (22/11/2026). **P0.4–P0.8 vẫn OPEN** (CI, Risk/TTL tổng thể, WAF privacy, benchmark và Baseline Ready). Không suy ra hiệu năng, FPR hay production readiness từ các unit/E2E PASS.
+- **Credentials local đã chia sẻ** trước đây cần rotation theo quy trình có kiểm soát; không lưu bí mật vào source, báo cáo hoặc Git. Chưa có bằng chứng việc rotation đã hoàn thành.
 
 ## III. GIAI ĐOẠN 1 — P0: HOÀN TẤT SECURITY BASELINE
 
-**Mục tiêu:** chốt phiên bản Rule-Based Gateway chính xác, có thể lặp lại, không gây hồi quy Django và có dữ liệu đo baseline phục vụ so sánh ML. **Ưu tiên hiện tại: P0.2.** Không chuyển sang P0.3 khi P0.2 chưa PASS.
+**Mục tiêu:** chốt phiên bản Rule-Based Gateway chính xác, có thể lặp lại, không gây hồi quy Django và có dữ liệu đo baseline phục vụ so sánh ML. **P0.2 đạt nghiệm thu kỹ thuật trong local/shadow ở checkpoint `4e7b350`**, còn formal closure; **P0.3 đạt LOCAL TECHNICAL ACCEPTANCE PASS tại source/test checkpoint `b510488`**. Không mở rộng quyền automatic ban khi chuyển sang P0.4–P0.8.
 
-| Mã | Nội dung, file/trọng điểm | Trạng thái | Điều kiện nghiệm thu cụ thể |
+| Mã | Nội dung thực tế / file trọng điểm | Trạng thái cập nhật 22/11/2026 | Giới hạn và điều kiện đóng |
 |---|---|---|---|
-| **P0.1** | Authorization: `views.py`, templates, `test_profile_authorization.py`, regression Django | **PASS** | 8/8 P0.1, 84/84 regression ban đầu; 302 anonymous theo báo cáo; manual Admin/Doctor ghi riêng nếu còn thiếu |
-| **P0.2.1** | Django login status contract: `@require_POST`, `X-Login-Status`, 7 tests | **PASS** | 91/91 Django regressions (18/11) |
-| **P0.2.2** | `nginx/nginx.conf`: exact locations; POST-only signal, không lộ internal header | **OPEN** | `openresty -t` PASS, gateway healthy, HTTP 405/403/302 đúng, header ẩn và Redis counter ghi đúng |
-| **P0.2.3** | `nginx/lua/brute_force_login.lua` và Lua tests: atomic `INCR+TTL`, threshold/cooldown, fallback | **OPEN** | Tăng đúng 1/lần failed login; threshold=5, window=300s, cooldown=3600s theo cấu hình; Redis fail test PASS |
-| **P0.2.4** | Live integration: Redis thực, concurrent requests, shared NAT/IP và recovery | **OPEN** | IP khóa/khôi phục đúng, không mất lần đếm trong bài test chấp nhận, chính sách shared IP và race condition được tài liệu hóa |
-| **P0.3** | CSRF: POST endpoints, Android/clients, auth + method | **OPEN** | CSRF negative/positive, tác động Android tái hiện hoặc loại trừ có bằng chứng |
-| **P0.4** | `dasapp.tests` trong Jenkins CI; Django/Lua/gateway smoke; artifact report | **OPEN** | CI trên commit mới chạy đầy đủ các nhóm test bắt buộc và lưu log |
-| **P0.5** | Risk weights, TTL, temporary ban, reputation/decay, Redis authority | **OPEN** | Quy tắc thang 0–100, TTL nhất quán, test shared IP/decay/ban-unban PASS |
-| **P0.6** | WAF SQLi/XSS false positives; log privacy / không có secrets hoặc PII | **OPEN** | Controlled benign/attack cases và audit logs có báo cáo |
-| **P0.7** | Traffic benchmark Rule-Based local (normal/burst/flood an toàn) | **OPEN** | Raw results + p50/p95/p99, RPS, CPU/RAM, tỷ lệ block/false positive có nhãn |
-| **P0.8** | Baseline version, test matrix, chính sách bảo mật, tài liệu và tag | **OPEN** | Có commit/tag, config snapshot không secrets, test & benchmark reports, checklist Baseline Ready |
+| **P0.1** | Authorization: Django views/templates, tests | **PASS lịch sử** | 8/8 P0.1; 84/84 regression; manual Admin/Doctor nếu cần ghi riêng |
+| **P0.2.1** | Django login status, `@require_POST`, session/auth | **PASS** | 91/91 Django tests (18/11); valid-account E2E bổ sung |
+| **P0.2.2** | Gateway login HTTP contract, internal-header stripping, trusted client IP | **TECHNICAL PASS local; hồ sơ method matrix cần đối chiếu** | `openresty -t`; V3 login 9/9; log `405/403/302` cần lưu nếu là gate nguyên văn |
+| **P0.2.3** | NAT-aware account/pair accounting tại `docappsystem/docappsystem/login_accounting.py`; `brute_force_login.lua` giữ telemetry/fallback | **TECHNICAL PASS local** | Redis atomic admit/finalize, bounded backoff, no legacy IP-only punishment; không giữ lại yêu cầu khóa toàn bộ IP tại ngưỡng 5 thất bại |
+| **P0.2.4 / A3.1–A3.4** | IP ban authorization, issuer, blacklist read/enforcement, correlator shadow, legacy audit, live integration | **TECHNICAL PASS local/shadow** | 145/145 LuaJIT; ban 10/10, blacklist 13/13, CAS 16/16, valid login 9/9, correlator shadow 8/3/2; recovery/AOF archive nếu là gate |
+| **P0.2 — tổng thể** | NAT-aware login security + authorized ban storage + WAF shadow correlation | **TECHNICAL PASS (LOCAL/SHADOW) / FORMAL PENDING** | Đồng bộ tài liệu, đối chiếu checklist còn thiếu, không suy rộng production |
+| **P0.3** | CSRF/Origin/Referer, session/logout POST-only, HTTP Method Inventory, Admin/Doctor RBAC và Proxy Trust | **LOCAL TECHNICAL ACCEPTANCE PASS** | Django 114 discovered / 102 PASS / 12 skipped; HTTP Method Inventory 16/16; Authenticated HTTPS 37/37, Proxy Trust 19/19, Admin/Doctor HTTPS 36/36; `docs/P0_3_SECURITY_ACCEPTANCE_2026-11-22.md`; source/test `b510488`, docs `7c51a35` |
+| **P0.4** | Django/Lua/Gateway tests trong Jenkins CI, artifact reports | **OPEN** | CI trên commit mới chạy suite cần thiết và lưu artifact |
+| **P0.5** | Risk weights, Redis reputation/decay, TTL, ban/unban policy | **OPEN** | Tổng kiểm toán policy/TTL và độ nhất quán cho baseline, không tái sử dụng IP lockout gây hại NAT |
+| **P0.6** | WAF SQLi/XSS false positives, log privacy | **OPEN** | Rà soát raw query/payload trong error logs và retention |
+| **P0.7** | Rule-Based benchmark trong local lab | **OPEN** | p50/p95/p99, RPS, CPU/RAM, legitimate burst và FP/FN có nhãn |
+| **P0.8** | Baseline version/tag, test matrix, báo cáo và config snapshot | **OPEN** | Gate Baseline Ready yêu cầu P0.1–P0.8, không chỉ P0.2 |
 
-### III.1. P0.2 — Chuỗi kiểm thử đang thực hiện
+### III.1. P0.2 — Kiến trúc đã triển khai và bằng chứng
 
-**Luồng:** Client `POST /doLogin/` → OpenResty `check_prelogin()` → Django authenticate → response `X-Login-Status` → OpenResty ghi failed attempt → Redis atomic count/TTL → lockout/blacklist/reputation → request tiếp theo bị chặn trước Django.
+**Luồng đăng nhập với V3 ON trong local E2E:** `POST /doLogin/` → OpenResty xác thực nguồn IP và kiểm tra prelogin → Django `LoginAccounting.admit()` atomic → Django authenticate → `LoginAccounting.finalize()` atomic → **chỉ khi finalize success được xác nhận mới tạo Django session** → các header `X-Login-*` nội bộ không được đưa cho client. Khi Redis trả lỗi/không xác nhận trạng thái, luồng liên quan fail-closed thay vì âm thầm tạo session.
 
-**Các điểm phải phân tích kỹ:**
+**Nguyên tắc NAT-aware:** failed-login accounting theo account+source (HMAC pseudonyms trong `bf:v3:*`, Redis DB0), kèm bounded backoff và telemetry spraying; **không** biến đếm sai mật khẩu thành `blacklist:<IP>`, IP lockout hoặc reputation penalty chỉ vì cùng IP. Một backoff tài khoản vẫn có thể tạm trì hoãn người dùng hợp lệ khi tài khoản bị tấn công; đây là rủi ro chấp nhận có giới hạn, không phải bảo đảm zero-DoS.
 
-1. Không tăng failed counter cho GET/PUT/CSRF rejection; chỉ tăng khi Django thật sự trả `failed` cho POST.
-2. Exact-match hai route login; nội bộ `X-Login-Status` không chuyển ra client.
-3. `ngx.timer.at(0, ...)` đang ghi failed counter bất đồng bộ trên `develop`: kiểm thử race giữa các request; nếu thiếu độ tin cậy thì thiết kế và test phương án ghi đồng bộ ở phase có cosocket hợp lệ, hoặc kiến trúc ack/queue phù hợp. Không tự khẳng định race đã được khắc phục.
-4. Lua đang duy trì các key `brute_force:fail:<IP>`, `brute_force:lockout:<IP>`, `blacklist:<IP>`, `risk:v1:<IP>`; kiểm tra cùng DB Redis và cùng canonical client IP.
-5. Giải quyết shared IP: lựa chọn rõ IP-only hoặc IP+account với phân tích NAT/CGNAT, account abuse và khả năng tự gây DoS; không thêm khóa tài khoản vĩnh viễn.
-6. Redis outage phải có fail-safe, trạng thái emergency lock/test ổn định; không để một lỗi Redis im lặng làm bỏ qua cơ chế bảo vệ.
+**Phân quyền ban IP:** `ip_ban_authorizer.lua` là contract xét điều kiện → `ip_ban_issuer.lua` kiểm tra lại và ghi `ban:v2:ip:<ip>` bằng Redis atomic `SET NX EX`, TTL tối đa 300s và metadata cùng key → `ip_blacklist.lua` đọc/thực thi. Manual ban trong `blacklist_ips` và Legacy TTL key `blacklist:<ip>` là hai quyền khác nhau; script audit Legacy **chỉ đọc**, không tự xóa/chuyển đổi trạng thái không rõ provenance.
 
-**Bằng chứng cần lưu:** output `openresty -t`, Docker `ps`, HTTP headers, Redis `GET/TTL` trước/sau, Lua regression summary, log security đã che thông tin nhạy cảm, kết quả concurrent/shared IP.
+**Security Correlator:** `security_signal_adapter` gắn nguồn WAF theo step, `security_shadow.log()` chuyển request-verified traces sang `security_correlator.lua`, theo dõi tối thiểu **8 requests / 3 cửa sổ 60s / 2 lớp WAF** trong 5 buckets gần nhất. Kết quả **`SUSPICIOUS_SHADOW`** không chứng minh exploit đã thành công, hai detector độc lập hay IP an toàn để ban. `verify()` vẫn fail-closed cho mọi incident; không có automatic issuance production từ correlator.
+
+| Bằng chứng kiểm thử | Kết quả đã báo cáo | Phạm vi diễn giải |
+|---|---|---|
+| Gateway LuaJIT offline regression | **145/145 PASS**, 13 suites | Bao gồm correlator 23/23 và issuer 12/12; không phải toàn bộ Django/Jenkins |
+| Redis + HTTP authorized-ban lifecycle | **10/10 PASS** | Synthetic Redis EVAL, TTL/metadata/HTTP 403/expiry; không phải correlator production issue |
+| HTTP Legacy/manual blacklist | **13/13 PASS** | Manual ban/unban, Legacy TTL auto, khôi phục HTTP 200 |
+| Reputation Redis CAS concurrency | **16/16 PASS** | Reject stale update, retry đúng snapshot, không ghi đè state |
+| Valid-account V3 HTTP E2E | **9/9 PASS** | Django session, success marker, spoofed `X-Real-IP` bị Gateway thay thế, rollback flag OFF |
+| V3 NAT-aware login HTTP E2E | **11/11 PASS** (giai đoạn A3.3) | Account/pair counters, shared-IP không bị ban; số liệu thuộc lần chạy khác |
+| Correlator Shadow HTTP | **PASS: 8 events, 3 windows, 2 classes** | Docker logs `[SECURITY_CORRELATOR] ... automatic_ban=disabled` |
+| Final local rollback | **PASS** | Gateway/App/Redis Healthy; `LOGIN_ACCOUNTING_ENABLED=False`, `SECURITY_CORRELATOR_SHADOW_ENABLED=false` |
+
+**Lưu ý các khoảng trống cần bảo quản:** Kết quả `openresty -t` và E2E được chủ dự án cung cấp; báo cáo nghiệm thu chưa phải Jenkins CI artifact. Bộ HTTP `405/403/302` đầy đủ và bản Redis AOF/recovery nguyên gốc chưa được đối chiếu trong checkpoint này; không dùng bảng trên thay thế chúng. Log WAF/OpenResty có thể chứa query/payload và thông tin định danh trong `docker logs`, cần redaction trước khi lưu lâu dài.
+
+**Nguồn tham chiếu P0.2 cố định:** SHA `4e7b350` (21/11/2026), `docs/SECURITY_CORRELATOR.md`, `docs/P0_2_SECURITY_ACCEPTANCE_2026-11-21.md`. **Nguồn P0.3:** source/test `b510488`, tài liệu `7c51a35`, `docs/P0_3_SECURITY_ACCEPTANCE_2026-11-22.md`. Không gắn nhãn ML production, full automatic IP ban hoặc global Rule-Based Baseline Ready.
 
 ### III.2. P0.5 — Điểm kỹ thuật cần khóa trước ML
 
-Hiện có sự khác biệt **từ review tĩnh `develop`**: `brute_force_login.lua` dùng TTL reputation cao đến `31,536,000s` ở một nhánh, trong khi `risk_engine.lua` chủ trương TTL bình thường `3,600s`, elevated `7,200s` và auto ban `900s`. Đây là vấn đề nhất quán **chưa khẳng định xảy ra trong local feature**; P0.5 phải xác định module nào có quyền ghi cuối cùng, rồi viết regression test TTL/decay khi hai module cùng tác động.
+**Mốc nguồn hiện tại cần kiểm toán:** `4e7b350` có các module Redis Rate Limiter, Risk Engine, Reputation CAS/decay, blacklist Manual/Legacy/V2. Ở A3.1–A3.4, Risk Engine và legacy failed-login accounting **không còn thẩm quyền tự cấp IP ban**. Kết quả tests riêng đã chứng minh các nhánh rate-only/context-only và một số lỗi Redis không tự nâng thành IP punishment; P0.5 vẫn phải kiểm toán tổng thể toàn bộ TTL, thứ tự áp dụng policy, side effects và false positives.
 
-`RISK_DECAY_ENABLED=true` trên `.env.local` và `false` trên `.env` Production tại thời điểm thảo luận; `RISK_DECAY_FACTOR=0.1`. Code Risk Engine tính decay theo chu kỳ 300 giây **khi có confirmed abuse tiếp theo**, không có timer tự giảm liên tục; không coi cờ bật là bằng chứng mô hình Adaptive đã triển khai. Đừng thay đổi production trước khi kiểm thử chính sách.
+Cảnh báo về TTL reputation dài `31,536,000s` và auto-ban `900s` trong bản kế hoạch 18/11 xuất phát từ **review lịch sử của nhánh `develop`**, không được coi là cấu hình đang hoạt động ở commit feature hiện tại. P0.5 phải đối chiếu từ source thực tế và bài test, không khôi phục hành vi khóa IP gây collateral damage trên NAT.
+
+`RISK_DECAY_ENABLED` và `RISK_DECAY_FACTOR` chỉ điều khiển logic decay của Risk Engine; không chứng minh có Adaptive Decision/ML. Chưa có số liệu benchmark hoặc FPR thực nghiệm chính thức tại thời điểm cập nhật tài liệu.
 
 ### III.3. Điều kiện đóng Baseline Ready
 
 - [ ] P0.1–P0.8 có test report và owner xác nhận, bao gồm toàn bộ P0.2 end-to-end.
 - [ ] Không có bypass nghiêm trọng trên authentication/authorization, CSRF, security pipeline.
-- [ ] Redis counter/lockout/ban/TTL đạt tiêu chí được công bố, fail-safe và shared IP có báo cáo.
+- [ ] Redis account/pair accounting, ban TTL, rollback và shared NAT có test matrix/báo cáo; không yêu cầu IP-only lockout kiểu cũ.
 - [ ] Django, Lua, Jenkins và Docker integration tests được ghi log, không chỉ tổng số PASS.
 - [ ] Có baseline benchmark, cấu hình versioned, tài liệu rule/reputation/alert và tag Rule-Based.
 
@@ -241,11 +260,11 @@ Không coi các cấu hình C0/C1 là thay đổi mục tiêu gốc: chúng là 
 
 ## VII. LỊCH ƯU TIÊN RÚT GỌN (KHOẢNG 5 TUẦN, CÓ THỂ ĐIỀU CHỈNH)
 
-**Lưu ý:** Đây là lịch đề xuất theo quỹ thời gian còn hơn một tháng, không phải deadline chính thức của trường. Các công việc nghiên cứu nhẹ có thể song song, nhưng **không chuyển P0.3 trước khi P0.2 PASS**.
+**Lưu ý:** Đây là lịch đề xuất tương đối, không phải deadline chính thức của trường. Tại mốc 22/11, P0.3 đã có **LOCAL TECHNICAL ACCEPTANCE PASS**, P0.2 còn formal closure; ưu tiên P0.2 evidence reconciliation, P0.4 CI và P0.5–P0.8. Không coi toàn bộ P0 đã hoàn tất.
 
 | Tuần tương đối | Trọng tâm critical path | Có thể song song (không mở rộng hạ tầng) | Mốc đầu ra |
 |---|---|---|---|
-| **W1** | Hoàn tất P0.2.2–P0.2.4; sau đó P0.3, P0.4 | Định nghĩa dataset/labels và feature schema P2 | Brute-force E2E PASS; CI scope rõ |
+| **W1** | Chốt hồ sơ/evidence còn thiếu của P0.2; hoàn thiện checkpoint P0.3 đã PASS; mở P0.4 CI | Định nghĩa dataset/labels và feature schema P2 | Hồ sơ P0.2 đối chiếu gate, P0.3 local acceptance và CI scope rõ |
 | **W2** | P0.5–P0.8, benchmark Rule-Based | Thu synthetic normal/burst/attack lab, chia split | **Baseline Ready** + dataset bản đầu |
 | **W3** | P2 finalize + P3 Random Forest train/evaluate | P1 chọn lọc: health/recovery/rollback evidence, không dựng hạ tầng mới | **Dataset Ready + Model Ready** |
 | **W4** | P4 inference, shadow, fallback, Adaptive Decision MVP | Chạy so sánh A/B/C0 và chỉnh documentation | **Hybrid Ready** (lab trước prod) |
@@ -280,18 +299,23 @@ Mỗi thư mục nên có README ngắn: mục tiêu, môi trường, lệnh, ph
 
 ### VIII.3. Bảng theo dõi tức thời và hành động kế tiếp
 
-| Mốc | Trạng thái 18/11 | Bằng chứng đã có | Bước tiếp theo |
+| Mốc | Trạng thái cập nhật 22/11 | Bằng chứng đã có | Bước tiếp theo |
 |---|---|---|---|
-| P0.1 | **PASS** | 8/8 + 84/84; 302 anonymous | Giữ regression, manual Admin/Doctor nếu chưa có |
-| P0.2.1 | **PASS** | 91/91 Django tests; 19.981s | Giữ test trong regression |
-| P0.2.2 | **OPEN** | Chưa nhận output Gateway/HTTP/Redis sau patch | Chủ dự án gửi `openresty -t`, HTTP headers, Redis counter trước/sau |
-| P0.2.3–2.4 | **OPEN** | Lua source/tests tham chiếu `develop` | Kiểm thử threshold, lockout, TTL, concurrency/shared IP/failure |
-| P0.3–P0.8 | **OPEN** | Đã có kế hoạch chi tiết | Chỉ thực hiện tuần tự sau khi P0.2 PASS |
-| P1 | **PARTIAL/REPORTED** | Compose/Jenkins/README; kết quả triển khai báo cáo | Chọn lọc recovery/rollback/monitoring cần cho demo |
-| P2 | **PLANNED** | Feature list và dataset protocol đề xuất | Viết schema + thu dữ liệu mô phỏng không PII |
-| P3 | **PLANNED** | Thuật toán và tiêu chí đánh giá đề xuất | Huấn luyện sau khi Dataset Ready |
-| P4 | **PLANNED** | Kiến trúc và Adaptive MVP đề xuất | Tích hợp sau Model Ready |
-| P5 | **PLANNED** | Kịch bản E1–E5 và cấu hình A–D/C0/C1 | Đo chính thức sau Hybrid Ready |
+| P0.1 | **PASS lịch sử** | 8/8 + 84/84; anonymous 302 | Giữ regression, bổ sung manual roles nếu cần |
+| P0.2.1 | **PASS** | 91/91 Django tests (18/11); valid-account 9/9 (21/11) | Gắn báo cáo và log theo mốc |
+| P0.2.2 | **TECHNICAL PASS local; FORMAL PENDING** | `openresty -t`, V3 E2E/header/trusted IP | Đối chiếu/lưu HTTP method/status matrix 405/403/302 |
+| P0.2.3 | **TECHNICAL PASS local** | NAT-aware V3, Redis atomic, shared-IP tests | Không khôi phục IP-only lockout; tài liệu hóa rollout flag |
+| P0.2.4 / A3.1–A3.4 | **TECHNICAL PASS local/shadow** | LuaJIT 145/145; ban 10/10; blacklist 13/13; CAS 16/16; valid login 9/9; shadow 8/3/2 | Kiểm tra AOF/recovery evidence nếu là gate; đồng bộ docs |
+| P0.2 tổng thể | **TECHNICAL PASS (LOCAL/SHADOW) / FORMAL PENDING** | Commit `4e7b350`, báo cáo ASG/P0.2/ACC-01 | Chốt hồ sơ P0.2; không bật automatic issuance |
+| P0.3 | **LOCAL TECHNICAL ACCEPTANCE PASS** | Django regression 114 tests (102 PASS, 12 skipped); HTTP Method Inventory 16/16; HTTPS E2E 37/37, Proxy 19/19, Admin/Doctor 36/36; SHA `b510488` và docs `7c51a35` | Giữ regression; không suy rộng production |
+| P0.4–P0.8 | **OPEN** | Kế hoạch CI, Risk/TTL, WAF/privacy, benchmark, baseline tag | Thực hiện từng gate và lưu evidence |
+| P1 | **PARTIAL / REPORTED** | Compose/Jenkins/AWS code và lịch sử vận hành | Recovery/rollback/monitoring demo readiness |
+| P2 | **PLANNED** | Dataset protocol/feature proposal | Tạo dataset card và schema không PII |
+| P3 | **PLANNED** | Model/evaluation plan | Train sau khi Dataset Ready |
+| P4 | **PLANNED** | Hybrid/Adaptive MVP plan | Enforce chỉ sau model, safety, fallback tests |
+| P5 | **PLANNED** | E1–E5 và cấu hình A–D/C0/C1 | Thu số liệu thực nghiệm có thể tái lập |
+
+**Chốt thay đổi:** P0.2 giữ phạm vi kỹ thuật local/shadow theo log và source checkpoint; P0.3 được nghiệm thu local theo các bộ test độc lập đã cung cấp. Không suy rộng sang production/AWS, CI trên GitHub, ML hoặc merge code.
 
 ## IX. NGUỒN TÀI LIỆU VÀ NHẬT KÝ CẬP NHẬT
 
@@ -306,4 +330,22 @@ Mỗi thư mục nên có README ngắn: mục tiêu, môi trường, lệnh, ph
 5. Không coi cờ `ADAPTIVE_*`/`BASELINE_*` chưa sử dụng là chức năng đã chạy; tránh đưa cấu hình chưa có implementation vào production.
 6. Giữ cấu trúc 4 giai đoạn gốc và 6 workstream thực thi P0–P5, ưu tiên bảo đảm chất lượng nghiên cứu và tiến độ.
 
-**Lần cập nhật tiếp theo:** Sau khi nhận kết quả P0.2.2 từ Gateway, điều chỉnh trạng thái theo log, không sửa các mục PASS đã được chứng minh nếu không xuất hiện hồi quy.
+**Nhật ký 21/11/2026 — v2.1 (P0.2 technical acceptance):**
+
+1. GitHub remote branch `feature/p0-security-baseline` xác nhận commit A3.4 `4e7b350`, parent `263ea9e` (A3.3); 14 file thay đổi, không suy ra đã merge `develop`/`main`.
+2. Cập nhật A3.1–A3.4: Risk Engine không tự ban; issuer chỉ ghi ban đã được policy cho phép, Redis TTL <=300s, phân biệt manual/legacy/V2; correlator Shadow là *evidence aggregation*, `verify()` fail-closed.
+3. Ghi nhận 145/145 Gateway LuaJIT, authorized ban 10/10, blacklist 13/13, Redis CAS 16/16, valid-account V3 9/9 và Correlator Shadow 8 events/3 windows/2 classes; Redis/Django/Gateway healthy và flags được rollback về OFF.
+4. Sửa phần mô tả IP-only lockout không còn tương thích NAT-aware V3; ghi rõ ranh giới local/shadow, synthetic EVAL test, các cảnh báo về shared NAT và dữ liệu log.
+5. Đánh dấu `P0.2 = TECHNICAL PASS (LOCAL/SHADOW) / FORMAL PENDING` tại mốc lịch sử 21/11; khi đó P0.3–P0.8 vẫn OPEN (trạng thái P0.3 đã được cập nhật trong nhật ký ngày 22/11 bên dưới).
+6. Phát hành tham chiếu báo cáo ASG/P0.2/ACC-01 (`P0_2_SECURITY_ACCEPTANCE_2026-11-21.md`), giữ phân biệt evidence thực tế với đề xuất nghiên cứu P2–P5.
+
+**Nhật ký 22/11/2026 — v2.2 (P0.3 local technical acceptance):**
+
+1. P0.3 đã hoàn thiện CSRF, Origin/Referer, logout POST-only, HTTP methods, session, role separation và proxy trust trong local lab.
+2. HTTP Method Inventory trải qua RED baseline (**100 assertion failures, 12 errors** ở 11 test methods) rồi GREEN (**16/16 test methods PASS**) sau method hardening; các subtests không được tính là lỗ hổng độc lập.
+3. Django full offline regression: **114 discovered / 102 executed PASS / 12 intentional skips**. Các nhóm 20 CSRF/Auth, 14 Role Matrix và 16 Inventory **đã nằm trong** 114, không cộng lặp.
+4. HTTPS E2E: authenticated flow **37/37**, proxy trust **19/19**, Admin/Doctor sessions **36/36**; chỉ xác nhận local lab, không phải production hoặc browser automation.
+5. Source/test checkpoint: `b510488`; P0.3 documentation được hoàn thiện/push tại `7c51a35` trên `feature/p0-security-baseline`. Báo cáo: `docs/P0_3_SECURITY_ACCEPTANCE_2026-11-22.md`; inventory: `docs/HTTP_METHOD_INVENTORY_P03.md`.
+6. Kết luận: **P0.3 LOCAL TECHNICAL ACCEPTANCE PASS**; **P0.2 FORMAL PENDING** tới khi đối chiếu evidence HTTP method matrix lịch sử và Redis recovery/AOF theo checklist gốc; **P0.4–P0.8 OPEN**, Rule-Based Baseline Ready chưa đạt.
+
+**Lần cập nhật tiếp theo:** Commit/push ba tài liệu P0.2 cùng script test maintenance sau review; ghi SHA mới mà không thay checkpoint P0.2 `4e7b350` hoặc P0.3 `b510488`; hoàn tất các gate lịch sử của P0.2 trước formal closure; tiếp tục P0.4–P0.8.

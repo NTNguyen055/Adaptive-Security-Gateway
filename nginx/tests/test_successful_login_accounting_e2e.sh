@@ -2,19 +2,22 @@
 # LOCAL-only valid-account V3 HTTP E2E through Gateway -> Django -> Redis.
 # Creates an isolated test user in LOCAL MySQL; removes it on EXIT.
 # Temporarily enables LOGIN_ACCOUNTING_ENABLED and restores it OFF on EXIT.
+# This HARDENED version changes fixture cleanup and local-only runtime guards.
+# It requires fresh local runtime validation before its result is accepted.
 # This script must NEVER run against production or a shared environment.
 set -Eeuo pipefail
 export MSYS_NO_PATHCONV=1
 
 cd "$(dirname "$0")/../../"
 base=(docker compose --env-file .env.local -f docker-compose.dev.yml)
-overlay="$(mktemp ./.asg-a34-login-XXXXXX.yml)"
-test_compose=(docker compose --env-file .env.local \
-  -f docker-compose.dev.yml -f "$overlay")
-client="asg-a34-auth-$$"
+# Create the overlay only AFTER local runtime guards pass, and register its
+# cleanup before any file or runtime resource is created.
+overlay=''
+test_compose=()
+client="asg-a34-auth-$(date +%s)-${RANDOM}-$$"
 client_started=0
 needs_rollback=0
-user_created=0
+user_create_attempted=0
 owned_keys=0
 user_id=""
 keys=()
@@ -33,21 +36,44 @@ flag() {
 }
 cleanup() {
   local status=$?
+  local remaining=''
   trap - EXIT INT TERM
   set +e
+
+  # The test owns this exact synthetic container name; no broad pruning.
   if (( client_started == 1 )); then
-    docker rm -f "$client" >/dev/null 2>&1
+    docker rm -f "$client" >/dev/null 2>&1 || {
+      echo 'CRITICAL: Failed to remove synthetic Docker client' >&2
+      status=1
+    }
   fi
+
+  # Only delete keys whose absence was verified before this run.
   if (( owned_keys == 1 && ${#keys[@]} > 0 )); then
-    redis_cli DEL "${keys[@]}" >/dev/null 2>&1
+    redis_cli DEL "${keys[@]}" >/dev/null 2>&1 || {
+      echo 'CRITICAL: Failed to remove owned Redis test keys' >&2
+      status=1
+    }
+    remaining="$(redis_cli EXISTS "${keys[@]}")"
+    if [[ $? -ne 0 || "$remaining" != 0 ]]; then
+      echo 'CRITICAL: Owned Redis test keys could not be verified absent' >&2
+      status=1
+    fi
   fi
+
   if (( needs_rollback == 1 )); then
     echo '=== Restore local LOGIN_ACCOUNTING_ENABLED=False ==='
     "${base[@]}" up -d --no-deps --force-recreate --wait app || status=1
     "${base[@]}" up -d --no-deps --force-recreate --wait gateway || status=1
-    [[ $(flag) == False ]] || status=1
+    [[ "$(flag)" == False ]] || {
+      echo 'CRITICAL: Local Login Accounting V3 rollback not verified' >&2
+      status=1
+    }
   fi
-  if (( user_created == 1 )) && [[ -n "$user_id" ]]; then
+
+  # A shell/transport failure after CREATE can hide stdout user_id. Look up
+  # only the unique synthetic username+email+role; never delete by prefix.
+  if (( user_create_attempted == 1 )); then
     "${base[@]}" exec -T \
       -e "ASG_A34_ID=$user_id" \
       -e "ASG_A34_EMAIL=$email" \
@@ -55,16 +81,34 @@ cleanup() {
       app python manage.py shell -c '
 import os
 from django.contrib.auth import get_user_model
+name = os.environ["ASG_A34_NAME"]
+mail = os.environ["ASG_A34_EMAIL"]
+assert name.startswith("asg_a34_")
+assert mail.startswith("asg-a34-") and mail.endswith("@example.invalid")
 qs = get_user_model().objects.filter(
-    pk=int(os.environ["ASG_A34_ID"]),
-    email=os.environ["ASG_A34_EMAIL"],
-    username=os.environ["ASG_A34_NAME"],
+    username=name,
+    email=mail,
+    user_type="1",
 )
-assert qs.count() == 1, "Refusing unsafe fixture deletion"
-qs.delete()
-' || status=1
+assert qs.count() <= 1, "Ambiguous synthetic user: refusing cleanup"
+if qs.exists():
+    actual_id = qs.values_list("pk", flat=True).get()
+    expected_id = os.environ.get("ASG_A34_ID", "")
+    if expected_id:
+        assert expected_id.isdecimal() and actual_id == int(expected_id), (
+            "Fixture ID mismatch: refusing cleanup"
+        )
+    qs.delete()
+print("LOCAL A3.4 SYNTHETIC ACCOUNT: REMOVED OR ABSENT")
+' || {
+      echo 'CRITICAL: Synthetic account cleanup failed; inspect exact fixture' >&2
+      status=1
+    }
   fi
-  rm -f "$overlay"
+
+  if [[ -n "$overlay" ]]; then
+    rm -f -- "$overlay" || status=1
+  fi
   if (( status == 0 )); then
     printf '\nA3.4 valid-account V3 HTTP E2E: %d passed, 0 failed\n' "$passed"
   else
@@ -77,6 +121,38 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 [[ -f .env.local && -f docker-compose.dev.yml ]] || fail 'Missing local stack'
+
+# No side effects until we know the public HTTPS listener and all runtime
+# dependencies belong to the expected local lab.
+port="$("${base[@]}" port gateway 443 2>/dev/null | tr -d '\r')" \
+  || fail 'Cannot inspect local Gateway HTTPS binding'
+[[ "$port" == '127.0.0.1:443' ]] \
+  || fail "Refusing non-loopback Gateway HTTPS binding: $port"
+for service in app gateway db redis; do
+  cid="$("${base[@]}" ps -q "$service")" || fail "Cannot inspect $service"
+  [[ -n "$cid" ]] || fail "Local service not running: $service"
+  health="$(docker inspect -f \
+    '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing-healthcheck{{end}}' \
+    "$cid")" || fail "Cannot inspect health for $service"
+  [[ "$health" == healthy ]] || fail "Unhealthy local service $service: $health"
+done
+runtime="$("${base[@]}" exec -T app python manage.py shell -c '
+import os
+from django.conf import settings
+safe = (
+    os.environ.get("APP_ENV") == "local"
+    and os.environ.get("DJANGO_SETTINGS_MODULE") == "docappsystem.settings_local"
+    and settings.DEBUG is False
+    and settings.LOGIN_ACCOUNTING_ENABLED is False
+    and settings.DATABASES["default"]["HOST"] == "db"
+    and settings.USE_X_FORWARDED_HOST is False
+    and settings.USE_X_FORWARDED_PORT is False
+    and settings.CSRF_TRUSTED_ORIGINS == []
+)
+print("SAFE_LOCAL_V3" if safe else "UNSAFE")
+' | tr -d '\r\n')" || fail 'Cannot inspect Django local runtime'
+[[ "$runtime" == SAFE_LOCAL_V3 ]] || fail 'Refusing unsafe Django runtime'
+
 [[ $(flag) == False ]] || fail 'Existing app must have V3 OFF initially'
 [[ $(redis_cli PING) == PONG ]] || fail 'Redis DB0 not ready'
 base_flag="$("${base[@]}" run --rm -T --no-deps app python -c \
@@ -84,7 +160,11 @@ base_flag="$("${base[@]}" run --rm -T --no-deps app python -c \
   | tail -n1 | tr -d '\r\n')"
 [[ "$base_flag" == False ]] || fail 'Base Compose must keep V3 OFF'
 pass 'Feature flag OFF in base runtime and rollback configuration'
+pass 'Loopback HTTPS, healthy services and safe local runtime verified'
 
+overlay="$(mktemp ./.asg-a34-login-XXXXXX.yml)" || fail 'Cannot create local overlay'
+test_compose=(docker compose --env-file .env.local \
+  -f docker-compose.dev.yml -f "$overlay")
 cat > "$overlay" <<'YAML'
 services:
   app:
@@ -126,6 +206,8 @@ owned_keys=1
 pass 'Synthetic account and source Redis state absent before test'
 
 # Create one disposable LOCAL test account. Never use a real email/password.
+# Track creation *before* invoking Django, even if stdout is lost after COMMIT.
+user_create_attempted=1
 user_id="$("${test_compose[@]}" exec -T \
   -e "ASG_A34_EMAIL=$email" -e "ASG_A34_NAME=$username" \
   -e "ASG_A34_PASS=$password" \
@@ -143,7 +225,6 @@ u = User.objects.create_user(
 print(u.pk)
 ' | tr -d '\r\n')" || fail 'Cannot create isolated local test user'
 [[ "$user_id" =~ ^[1-9][0-9]*$ ]] || fail 'Invalid synthetic user ID'
-user_created=1
 pass 'Isolated valid user created in local Django database'
 
 docker exec "$client" curl -kfsS --max-time 12 \
