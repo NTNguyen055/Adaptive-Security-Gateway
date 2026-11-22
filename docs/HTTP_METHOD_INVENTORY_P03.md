@@ -1,9 +1,11 @@
 # HTTP Method Inventory — CSRF & Authentication Request Security
 
 **Project:** Adaptive Security Gateway + ML for Layer 7  
-**Environment:** local Docker Compose HTTPS lab  
-**Scope:** Django application URL routes + custom Admin/Doctor panels  
-**Status:** Draft inventory for RED → GREEN verification; not a P0.3 acceptance certificate  
+**Status:** VERIFIED — LOCAL HTTP METHOD INVENTORY PASS
+**Verified checkpoint:** `b510488`
+**Verification:** 16/16 inventory tests PASS
+**Django regression:** 114 discovered, 102 PASS, 12 skipped
+**Environment:** Local Docker Compose / Django isolated testing
 **Baseline:** previously verified CSRF/role suite and 98 Django discovered tests (86 passed, 12 intentional live-Redis skips); 37-checkpoint authenticated HTTPS E2E; 19-checkpoint proxy-trust HTTPS E2E.
 
 ## Classification

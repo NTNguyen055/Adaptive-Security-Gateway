@@ -4,8 +4,8 @@
 **Dự án:** AdaptiveSecurityGW + Machine Learning for Layer 7
 **Nhánh phát triển:** `feature/p0-security-baseline`
 **Ngày kiểm thử:** 2026-11-22 (Asia/Ho_Chi_Minh)
-**Phiên bản/commit được nghiệm thu:** `PENDING_COMMIT_HASH`
-**Trạng thái:** **TECHNICAL TESTS PASS — FORMAL ACCEPTANCE PENDING SOURCE/DIFF AUDIT & GIT CHECKPOINT**
+**Phiên bản/commit được nghiệm thu:** `b510488`
+**Trạng thái:** **P0.3 LOCAL TECHNICAL ACCEPTANCE — PASS**
 **Môi trường:** Docker Compose local; HTTPS `https://localhost` qua OpenResty; Django; MySQL; Redis. Không sử dụng staging/production.
 
 > Báo cáo tổng hợp những kết quả người thực hiện đã cung cấp qua terminal. Không có tuyên bố rằng bên review trực tiếp chạy Docker trên máy người thực hiện. Số lượng Django regression đã bao gồm các bộ unit test thành phần; không cộng lặp để quảng bá thành số test độc lập.
@@ -107,7 +107,14 @@ Gợi ý cấu trúc checkpoint:
 2. Commit P0.2 docs/maintenance riêng (sau review): `SECURITY_CORRELATOR.md`, `Ke_hoach_tong_the_ASG_ML.md`, `P0_2_SECURITY_ACCEPTANCE_2026-11-21.md`, script rename.
 3. Push nhánh `feature/p0-security-baseline` sau khi xác minh chỉ có các commit mong muốn.
 
-**Commit hash:** `PENDING_COMMIT_HASH`
-**Git remote:** `PENDING_REMOTE_VERIFICATION`
-**Người nghiệm thu:** `PENDING_USER_REVIEW`
-**Kết luận cuối:** **PENDING FINAL AUDIT**. Các tiêu chí kiểm thử kỹ thuật đã đạt trong phạm vi Local Security Lab.
+**Source/Test Checkpoint:** `b51048889b681ae78e8dca55904245ce0ad3eb3e`
+
+**Git Remote:** `origin/feature/p0-security-baseline`
+
+**Git Remote Verification:** PASS — branch HEAD đã được xác minh qua GitHub.
+
+**Người nghiệm thu:** Người thực hiện đồ án, căn cứ kết quả kiểm thử local và Git checkpoint.
+
+**Kết luận:** P0.3 LOCAL TECHNICAL ACCEPTANCE — PASS.
+Không bao gồm nghiệm thu cấu hình production, chứng chỉ TLS công khai,
+Redis recovery/AOF hoặc các đầu việc tồn đọng riêng của P0.2.
