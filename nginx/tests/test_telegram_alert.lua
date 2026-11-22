@@ -38,7 +38,8 @@ package.loaded['resty.http'] = {
                 request_uri=function() return {status=200,body='ok'} end}
     end,
 }
-local alert = assert(loadfile('/tmp/lua/telegram_alert.lua'))()
+local source = (arg and arg[1]) or '/tmp/lua/telegram_alert.lua'
+local alert = assert(loadfile(source))()
 local function fire(ip)
     alert.send({ip=ip, attack_type='Brute Force Login', details='test'})
 end

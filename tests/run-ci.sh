@@ -15,6 +15,13 @@ cd "$ROOT"
 # Mount only code and tests from the currently checked-out commit.
 lua_tests=(
   'test_ip_blacklist:ip_blacklist'
+  'test_ip_ban_authorizer:ip_ban_authorizer'
+  'test_ip_ban_issuer:ip_ban_issuer'
+  'test_security_correlator:security_correlator'
+  'test_security_policy:security_policy'
+  'test_security_shadow:security_shadow'
+  'test_security_signal_adapter:security_signal_adapter'
+  'test_telegram_alert:telegram_alert'
   'test_brute_force_login:brute_force_login'
   'test_jwt_auth:jwt_auth'
   'test_metrics_labels:metrics_labels'
@@ -50,18 +57,73 @@ fi
 DOCKER_TESTS_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/tests"
 DOCKER_LUA_DIR="${DOCKER_WORKSPACE_ROOT}/nginx/lua"
 
-printf '\n=== OpenResty LuaJIT regression (11 suites) ===\n'
+printf '\n=== OpenResty LuaJIT regression (%d suites) ===\n' \
+  "${#lua_tests[@]}"
+
+suites=0
+total=0
+
 for pair in "${lua_tests[@]}"; do
   test_name="${pair%%:*}"
   source_name="${pair#*:}"
+
   printf '\n--- %s ---\n' "$test_name"
-  docker run --rm --network none \
-    --mount "type=bind,source=${DOCKER_TESTS_DIR},target=/asg-tests,readonly" \
-    --mount "type=bind,source=${DOCKER_LUA_DIR},target=/asg-lua,readonly" \
-    --entrypoint /usr/local/openresty/luajit/bin/luajit \
-    "${GW_IMAGE}:${IMAGE_TAG}" \
-    "/asg-tests/${test_name}.lua" "/asg-lua/${source_name}.lua"
+
+  extra_env=()
+
+  if [[ "$test_name" == "test_telegram_alert" ]]; then
+    extra_env=(
+      -e TELEGRAM_BOT_TOKEN=asg-ci-synthetic-token
+      -e TELEGRAM_CHAT_ID=0
+    )
+  fi
+
+  if ! output="$(
+    docker run --rm --network none \
+      --workdir /asg \
+      --mount "type=bind,source=${DOCKER_TESTS_DIR},target=/asg/nginx/tests,readonly" \
+      --mount "type=bind,source=${DOCKER_LUA_DIR},target=/asg/nginx/lua,readonly" \
+      -e 'LUA_PATH=/asg/nginx/lua/?.lua;;' \
+      "${extra_env[@]}" \
+      --entrypoint /usr/local/openresty/luajit/bin/luajit \
+      "${GW_IMAGE}:${IMAGE_TAG}" \
+      "/asg/nginx/tests/${test_name}.lua" \
+      "/asg/nginx/lua/${source_name}.lua" 2>&1
+  )"; then
+    printf '%s\n' "$output" >&2
+    printf 'FAIL: %s exited nonzero\n' "$test_name" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$output"
+  summary="${output##*$'\n'}"
+
+  if [[ "$summary" =~ ([0-9]+)[[:space:]]passed,[[:space:]]([0-9]+)[[:space:]]failed ]]; then
+    cases="${BASH_REMATCH[1]}"
+    failures="${BASH_REMATCH[2]}"
+
+    if (( 10#$failures != 0 )); then
+      printf 'FAIL: %s reported failed cases\n' "$test_name" >&2
+      exit 1
+    fi
+  elif [[ "$summary" =~ ^([0-9]+)[[:space:]]+.*tests[[:space:]]PASS$ ]]; then
+    cases="${BASH_REMATCH[1]}"
+  else
+    printf 'FAIL: %s has no recognized test summary\n' "$test_name" >&2
+    exit 1
+  fi
+
+  (( 10#$cases > 0 )) || {
+    printf 'FAIL: %s reported zero test cases\n' "$test_name" >&2
+    exit 1
+  }
+
+  suites=$((suites + 1))
+  total=$((total + 10#$cases))
 done
+
+printf '\nGateway CI regression: %d suites, %d cases PASS\n' \
+  "$suites" "$total"
 
 # settings_test extends settings_local but replaces MySQL and Redis with
 # isolated, in-memory backends. Dummy values satisfy startup validation only.

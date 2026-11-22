@@ -105,6 +105,7 @@ pipeline {
                         docappsystem/docappsystem/settings_test.py \
                         docappsystem/docappsystem/middleware.py \
                         nginx/Dockerfile nginx/nginx.conf \
+                        tests/check-ci-suite-parity.sh \
                         tests/run-ci.sh; do
                         test -f "$file" || { echo "MISSING: $file" >&2; exit 1; }
                     done
@@ -114,6 +115,9 @@ pipeline {
                         test -f "nginx/lua/${lua}.lua" || { echo "MISSING Lua: $lua" >&2; exit 1; }
                     done
                     bash -n tests/run-ci.sh
+                    bash -n tests/run-unit.sh
+                    bash -n tests/check-ci-suite-parity.sh
+                    bash tests/check-ci-suite-parity.sh
                     git diff --check
                     echo 'Pre-build checks PASS'
                 '''
