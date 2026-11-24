@@ -3,24 +3,146 @@ local _M = {}
 local ngx        = ngx
 local tonumber   = tonumber
 local math_min   = math.min
-local redis_helper = require "redis_helper" -- FIX 1: Tái sử dụng redis_helper.lua
+local redis_helper = require "redis_helper"
 local telegram_alert = require "telegram_alert"
 
+
 -- ============================================================
--- CONFIG
+-- CONFIG: VALIDATION
 -- ============================================================
+
+local DEFAULT_LIMIT_THRESHOLD = 50
+local DEFAULT_BLOCK_THRESHOLD = 80
+local DEFAULT_DECAY_FACTOR = 0.1
+
+-- Avoid repeating configuration warnings for every request.
+-- Module-local state is isolated per OpenResty worker.
+local warned_config = {}
+
+local function warn_invalid_config_once(key, message)
+    if warned_config[key] then
+        return
+    end
+
+    warned_config[key] = true
+
+    ngx.log(
+        ngx.WARN,
+        "[RISK][CONFIG] ",
+        message
+    )
+end
+
+local function is_finite_number(value)
+    return type(value) == "number"
+        and value == value
+        and value ~= math.huge
+        and value ~= -math.huge
+end
+
 local function get_config()
+    -- --------------------------------------------------------
+    -- 1. Validate LIMIT/BLOCK thresholds together.
+    -- Invariant: 0 < limit < block <= 100.
+    -- --------------------------------------------------------
+    local raw_limit = os.getenv("RISK_LIMIT_THRESHOLD")
+    local raw_block = os.getenv("RISK_BLOCK_THRESHOLD")
+
+    local limit_threshold = DEFAULT_LIMIT_THRESHOLD
+    local block_threshold = DEFAULT_BLOCK_THRESHOLD
+
+    if raw_limit ~= nil then
+        limit_threshold = tonumber(raw_limit)
+    end
+
+    if raw_block ~= nil then
+        block_threshold = tonumber(raw_block)
+    end
+
+    if not is_finite_number(limit_threshold)
+        or not is_finite_number(block_threshold)
+        or limit_threshold <= 0
+        or block_threshold > 100
+        or limit_threshold >= block_threshold then
+
+        warn_invalid_config_once(
+            "thresholds",
+            "Invalid risk thresholds; using defaults " ..
+            "LIMIT=50 BLOCK=80"
+        )
+
+        limit_threshold = DEFAULT_LIMIT_THRESHOLD
+        block_threshold = DEFAULT_BLOCK_THRESHOLD
+    end
+
+    -- --------------------------------------------------------
+    -- 2. Strictly parse the decay toggle.
+    -- Missing: retain historical default=true.
+    -- Explicit false: supported.
+    -- Invalid: use documented default and warn.
+    -- --------------------------------------------------------
+    local raw_decay_enabled =
+        os.getenv("RISK_DECAY_ENABLED")
+
+    local decay_enabled = true
+
+    if raw_decay_enabled ~= nil then
+        local normalized = ""
+
+        if type(raw_decay_enabled) == "string" then
+            normalized = raw_decay_enabled:lower()
+        end
+
+        if normalized == "true" then
+            decay_enabled = true
+        elseif normalized == "false" then
+            decay_enabled = false
+        else
+            warn_invalid_config_once(
+                "decay_enabled",
+                "Invalid RISK_DECAY_ENABLED; " ..
+                "using default=true"
+            )
+
+            decay_enabled = true
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- 3. Validate decay factor.
+    -- Preserve the existing [0,1] clamp contract.
+    -- --------------------------------------------------------
+    local raw_factor = os.getenv("RISK_DECAY_FACTOR")
+    local decay_factor = DEFAULT_DECAY_FACTOR
+
+    if raw_factor ~= nil then
+        local parsed = tonumber(raw_factor)
+
+        if not is_finite_number(parsed) then
+            warn_invalid_config_once(
+                "decay_factor",
+                "Invalid RISK_DECAY_FACTOR; " ..
+                "using default=0.1"
+            )
+        else
+            if parsed < 0 or parsed > 1 then
+                warn_invalid_config_once(
+                    "decay_factor",
+                    "RISK_DECAY_FACTOR outside [0,1]; " ..
+                    "clamping to supported range"
+                )
+            end
+
+            decay_factor =
+                math.max(0, math.min(1, parsed))
+        end
+    end
+
     return {
-        -- Ngưỡng hành động của Risk Engine:
-        -- Đạt 50 điểm sẽ bị Limit (giới hạn / Captcha), đạt 80 điểm sẽ bị Block (chặn hoàn toàn).
-        block_threshold = tonumber(os.getenv("RISK_BLOCK_THRESHOLD")) or 80,
-        limit_threshold = tonumber(os.getenv("RISK_LIMIT_THRESHOLD")) or 50,
-        -- Time-based reputation decay.  Decay is applied to stored reputation
-        -- when a *subsequent confirmed attack* is evaluated, not on clean traffic.
-        -- Opt out with RISK_DECAY_ENABLED=false if the deployment requires it.
-        decay_enabled = (os.getenv("RISK_DECAY_ENABLED") or "true"):lower() == "true",
-        -- Fraction removed per 5-minute period (clamped to [0, 1]).
-        decay_factor = tonumber(os.getenv("RISK_DECAY_FACTOR")) or 0.1,
+        limit_threshold = limit_threshold,
+        block_threshold = block_threshold,
+        decay_enabled = decay_enabled,
+        decay_factor = decay_factor,
     }
 end
 
@@ -205,7 +327,6 @@ function _M.run(ctx)
         or ctx.security.rate_limit_hard
         or ctx.security.redis_rate_exceeded
         or ctx.security.bad_bot_scanner
-        or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
 
     if ctx.security.jwt_missing and not independent_abuse then
@@ -236,13 +357,12 @@ function _M.run(ctx)
         ctx.security.waf_sqli
         or ctx.security.waf_xss
         or ctx.security.bad_bot_scanner
-        or ctx.security.bad_bot_headless
-        or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
-        or ctx.security.xff_malformed
-        or ctx.security.xff_private_chain
         or ctx.security.jwt_replay
         or ctx.security.jwt_alg_attack
+        or ctx.security.jwt_invalid
+        or ctx.security.geo_blocked
+        or ctx.security.ip_blacklisted
 
     if has_rate_violation and not has_attack_evidence then
         ctx.security.block = true
@@ -266,20 +386,38 @@ function _M.run(ctx)
         return
     end
 
-    -- ============================================================
-    -- CONTEXT-ONLY FALSE POSITIVE GUARD
-    -- ============================================================
-    -- Các tín hiệu ngữ cảnh không đủ để kết luận IP tấn công.
-    -- Không tích lũy reputation hoặc blacklist nếu không có
-    -- bằng chứng tấn công độc lập.
-
+    -- Only selected stronger detector evidence may enter
+    -- cumulative IP reputation.
+    -- Contextual/header-only, rate-only, JWT state and headless-only
+    -- observations must not poison shared NAT/CGNAT reputation.
     local reputation_worthy =
-        independent_abuse
-        or ctx.security.bad_bot_headless
-        or ctx.security.jwt_replay
-        or ctx.security.jwt_alg_attack
-        or ctx.security.xff_malformed
-        or ctx.security.xff_private_chain
+        ctx.security.waf_sqli
+        or ctx.security.waf_xss
+        or ctx.security.bad_bot_scanner
+
+    -- Headless-only is a request-scoped throttle.
+    -- Do not persist an IP-wide reputation penalty for this signal.
+    -- Preserve any stronger denial already established upstream.
+    if ctx.security.bad_bot_headless
+        and not reputation_worthy
+        and ctx.security.block ~= true
+        and ctx.security.risk_action ~= "block" then
+
+        ctx.security.risk_action = "limit"
+        ctx.security.risk_final = base_risk
+
+        ngx.var.log_risk_score =
+            string.format("%.1f", base_risk)
+
+        ngx.var.log_security_block = "limit"
+
+        ngx.log(
+            ngx.INFO,
+            "[RISK] Headless request-only mitigation; reputation unchanged"
+        )
+
+        return
+    end
 
     if not reputation_worthy then
         -- Giữ điểm quan sát phục vụ audit.

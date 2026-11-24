@@ -106,7 +106,9 @@ pipeline {
                         docappsystem/docappsystem/middleware.py \
                         nginx/Dockerfile nginx/nginx.conf \
                         tests/check-ci-suite-parity.sh \
-                        tests/run-ci.sh; do
+                        tests/run-ci.sh \
+                        tests/check_risk_config.py \
+                        tests/test_check_risk_config.py; do
                         test -f "$file" || { echo "MISSING: $file" >&2; exit 1; }
                     done
                     for lua in xff_guard ip_blacklist geo_block bad_bot \
@@ -118,6 +120,18 @@ pipeline {
                     bash -n tests/run-unit.sh
                     bash -n tests/check-ci-suite-parity.sh
                     bash tests/check-ci-suite-parity.sh
+                    command -v python3 >/dev/null || exit 1
+
+                    python3 -m unittest discover \
+                    -s tests \
+                    -p 'test_check_risk_config.py' -v
+
+                    python3 tests/check_risk_config.py \
+                    --env-file .env.example
+
+                    python3 tests/check_risk_config.py \
+                    --env-file .env.local.example
+
                     git diff --check
                     echo 'Pre-build checks PASS'
                 '''
@@ -422,6 +436,16 @@ restore_source() {
     fi
 }
 
+log 'Validating Risk Engine production config...'
+
+if ! command -v python3 >/dev/null || \
+   ! python3 "$APP_DIR/tests/check_risk_config.py" \
+     --env-file "$ENV_PATH"; then
+
+    restore_source || fail 'Source restoration failed'
+    fail 'Invalid Risk Engine config; deployment rejected'
+fi
+
 log '[5] Pulling release application image...'
 docker pull "${APP_IMAGE}:${IMAGE_TAG}" || {
     restore_source || fail "Image pull failed and source restoration failed"
@@ -563,6 +587,37 @@ FETCHED_SHA=$(git rev-parse FETCH_HEAD)
 
 [ "$FETCHED_SHA" = "$SOURCE_COMMIT" ] || \
     fail "GitHub main=$FETCHED_SHA differs from Jenkins=$SOURCE_COMMIT"
+
+# Strict production risk configuration gate.
+# Execute the validator from the exact verified release commit.
+# Reject invalid configuration before changing images or services.
+
+log 'Validating production Risk Engine configuration...'
+
+command -v python3 >/dev/null || \
+    fail 'Python3 unavailable on EC2; cannot validate risk config'
+
+P05_VALIDATOR_TMP="$(mktemp)" || \
+    fail 'Cannot create temporary preflight file'
+
+# Ensure cleanup on normal exit or validation failure.
+trap 'rm -f -- "$P05_VALIDATOR_TMP"' EXIT
+
+if ! git show "${SOURCE_COMMIT}:tests/check_risk_config.py" \
+    > "$P05_VALIDATOR_TMP"; then
+
+    fail 'Risk config validator missing from verified release'
+fi
+
+if ! python3 "$P05_VALIDATOR_TMP" \
+    --env-file "$ENV_PATH"; then
+
+    fail 'Invalid production Risk Engine config; deployment rejected'
+fi
+
+rm -f -- "$P05_VALIDATOR_TMP"
+
+log 'Production Risk Engine configuration validated'
 
 log '[3] Detecting previous production images...'
 
