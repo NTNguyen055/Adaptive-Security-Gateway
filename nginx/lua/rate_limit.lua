@@ -39,8 +39,15 @@ end
 -- MAIN
 -- ============================================================
 function _M.run(ctx)
+    ctx.security = ctx.security or {}
+    ctx.security.signals = ctx.security.signals or {}
+
     local limiter = get_limiter()
-    if not limiter then return end
+
+    if not limiter then
+        ctx.security.local_rl_error = true
+        return
+    end
 
     local ip = (ctx.security and ctx.security.client_ip)
                or ngx.var.remote_addr
@@ -51,9 +58,6 @@ function _M.run(ctx)
     -- Giới hạn áp dụng tổng quát cho MỌI endpoint. Hacker có đổi URL ngẫu nhiên
     -- (Ví dụ: /api/1, /api/2) thì IP của hắn vẫn bị cộng dồn và ăn block.
     local key = ip
-
-    ctx.security         = ctx.security or {}
-    ctx.security.signals = ctx.security.signals or {}
 
     -- Đưa IP vào Token Bucket. Hàm `incoming` sẽ đánh giá:
     -- 1. Nếu delay = 0: Request hoàn toàn bình thường.
@@ -69,11 +73,23 @@ function _M.run(ctx)
 
             table.insert(ctx.security.signals, "rate_limit_hard")
 
-            ngx.log(ngx.WARN, "[RATE_LIMIT] HARD Block ip=", ip)
+            ngx.log(
+                ngx.WARN,
+                "[RATE_LIMIT] HARD Block ip=",
+                ip
+            )
             return
         end
 
-        ngx.log(ngx.ERR, "[RATE_LIMIT] Error: ", err)
+        -- Operational failure, not evidence of abusive traffic.
+        ctx.security.local_rl_error = true
+
+        ngx.log(
+            ngx.ERR,
+            "[RATE_LIMIT] Error: ",
+            tostring(err)
+        )
+
         return
     end
 

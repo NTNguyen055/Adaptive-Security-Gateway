@@ -1,7 +1,8 @@
 // Adaptive Security Gateway — Jenkins CI/CD
-// Pipeline: Checkout -> Validate -> Build -> Unit Tests -> Smoke -> Release Gate
-//           -> Docker Hub -> EC2 Deploy/Verify
-// The existing production delivery path is retained; only main may publish/deploy.
+// Pipeline: Checkout -> Validate -> Build -> Unit Regression
+//           -> Smoke -> Gateway HTTPS Fault Lab
+//           -> Branch-specific Publish / Release / Deploy
+// Production publishing and deployment remain restricted to main.
 
 pipeline {
     agent any
@@ -39,6 +40,8 @@ pipeline {
                     env.ASG_CHECK_BUILD = 'SKIPPED'
                     env.ASG_CHECK_UNIT = 'SKIPPED'
                     env.ASG_CHECK_SMOKE = 'SKIPPED'
+                    env.ASG_CHECK_FAULT_LAB = 'SKIPPED'
+                    env.FAULT_LAB_EVIDENCE = ''
                     env.ASG_CHECK_RELEASE = 'SKIPPED'
                     env.ASG_CHECK_DOCKER = 'SKIPPED'
                     env.ASG_CHECK_MIGRATION = 'SKIPPED'
@@ -99,6 +102,8 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    # 1. Verify required files
                     for file in Jenkinsfile docker-compose.yml \
                         docappsystem/Dockerfile docappsystem/requirements.txt \
                         docappsystem/docappsystem/settings.py \
@@ -108,31 +113,79 @@ pipeline {
                         tests/check-ci-suite-parity.sh \
                         tests/run-ci.sh \
                         tests/check_risk_config.py \
-                        tests/test_check_risk_config.py; do
-                        test -f "$file" || { echo "MISSING: $file" >&2; exit 1; }
+                        tests/test_check_risk_config.py \
+                        tests/gateway_fault_lab/run_lab.py \
+                        tests/gateway_fault_lab/fault_worker.lua \
+                        tests/gateway_fault_lab/mock_backend.py \
+                        tests/gateway_fault_lab/test_lab_helpers.py \
+                        tests/test_gateway_fault_wiring.py; do
+                        test -f "$file" || {
+                            echo "MISSING: $file" >&2
+                            exit 1
+                        }
                     done
+
+                    # 2. Verify required Lua modules
                     for lua in xff_guard ip_blacklist geo_block bad_bot \
                         rate_limit rate_limit_redis waf_sqli_xss \
-                        jwt_auth risk_engine utils redis_helper metrics_labels; do
-                        test -f "nginx/lua/${lua}.lua" || { echo "MISSING Lua: $lua" >&2; exit 1; }
+                        jwt_auth risk_engine utils redis_helper metrics_labels \
+                        gateway_fault_guard; do
+                        test -f "nginx/lua/${lua}.lua" || {
+                            echo "MISSING Lua: $lua" >&2
+                            exit 1
+                        }
                     done
+
+                    # 3. Shell syntax and Lua suite parity
                     bash -n tests/run-ci.sh
                     bash -n tests/run-unit.sh
                     bash -n tests/check-ci-suite-parity.sh
                     bash tests/check-ci-suite-parity.sh
-                    command -v python3 >/dev/null || exit 1
+
+                    # 4. Verify Python runtime
+                    command -v python3 >/dev/null || {
+                        echo "FAIL: Python3 not found" >&2
+                        exit 1
+                    }
+
+                    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
+                        echo "FAIL: Python >= 3.10 required" >&2
+                        exit 1
+                    }
+
+                    # 5. Risk Configuration Preflight
+                    python3 -m unittest discover \
+                        -s tests \
+                        -p 'test_check_risk_config.py' -v
+
+                    python3 tests/check_risk_config.py \
+                        --env-file .env.example
+
+                    python3 tests/check_risk_config.py \
+                        --env-file .env.local.example
+
+                    # 6. Gateway Fault Guard Wiring
+                    python3 -m unittest discover \
+                        -s tests \
+                        -p 'test_gateway_fault_wiring.py' -v
+
+                    # 7. Git whitespace validation
+                    git diff --check
+
+                    # Gateway HTTPS Fault Lab preflight
+                    echo 'Checking Gateway Fault Lab Python syntax...'
+
+                    python3 -m py_compile \
+                        tests/gateway_fault_lab/run_lab.py \
+                        tests/gateway_fault_lab/mock_backend.py \
+                        tests/gateway_fault_lab/test_lab_helpers.py
+
+                    echo 'Running Gateway Fault Lab helper regression...'
 
                     python3 -m unittest discover \
-                    -s tests \
-                    -p 'test_check_risk_config.py' -v
+                        -s tests/gateway_fault_lab \
+                        -p 'test_lab_helpers.py' -v
 
-                    python3 tests/check_risk_config.py \
-                    --env-file .env.example
-
-                    python3 tests/check_risk_config.py \
-                    --env-file .env.local.example
-
-                    git diff --check
                     echo 'Pre-build checks PASS'
                 '''
             }
@@ -254,6 +307,129 @@ pipeline {
                 }
                 aborted {
                     script { env.ASG_CHECK_SMOKE = 'CANCELED' }
+                }
+            }
+        }
+
+        stage('Gateway HTTPS Fault Lab') {
+            steps {
+                script {
+                    // Create a unique evidence directory for this build.
+                    env.FAULT_LAB_EVIDENCE = sh(
+                        script: 'mktemp -d gateway-fault-lab-results-ci-XXXXXXXX',
+                        returnStdout: true
+                    ).trim()
+                }
+
+                sh '''
+                    set -eu
+
+                    GW_REF="${GW_IMAGE}:${IMAGE_TAG}"
+                    APP_REF="${APP_IMAGE}:${IMAGE_TAG}"
+
+                    REDIS_REF="redis@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7"
+
+                    echo '=== Gateway HTTPS Fault Lab ==='
+                    echo "Source commit: ${SOURCE_COMMIT}"
+                    echo "Gateway image: ${GW_REF}"
+                    echo "App image: ${APP_REF}"
+
+                    printf '%s\\n' "$SOURCE_COMMIT" \
+                        > "${FAULT_LAB_EVIDENCE}/source-commit.txt"
+
+                    # Verify that both images belong to this checkout.
+                    GW_REVISION="$(docker image inspect \
+                        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                        "$GW_REF")"
+
+                    APP_REVISION="$(docker image inspect \
+                        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                        "$APP_REF")"
+
+                    if [ "$GW_REVISION" != "$SOURCE_COMMIT" ] || \
+                       [ "$APP_REVISION" != "$SOURCE_COMMIT" ]; then
+
+                        echo 'FAIL: CI image revision mismatch' >&2
+                        exit 1
+                    fi
+
+                    GW_ID="$(docker image inspect \
+                        --format '{{.Id}}' "$GW_REF")"
+
+                    test -n "$GW_ID"
+
+                    echo "Gateway image ID: ${GW_ID}"
+
+                    # The lab runner only uses existing local images.
+                    # Pull the pinned Redis image if it is not cached.
+                    if ! docker image inspect "$REDIS_REF" \
+                        >/dev/null 2>&1; then
+
+                        docker pull "$REDIS_REF"
+                    fi
+
+                    # Execute isolated HTTPS runtime security tests.
+                    if python3 tests/gateway_fault_lab/run_lab.py \
+                        --gateway-image "$GW_REF" \
+                        --app-image "$APP_REF" \
+                        --redis-image "$REDIS_REF" \
+                        --expected-image-id "$GW_ID" \
+                        --output "${FAULT_LAB_EVIDENCE}/matrix" \
+                        > "${FAULT_LAB_EVIDENCE}/runner.log" 2>&1; then
+
+                        cat "${FAULT_LAB_EVIDENCE}/runner.log"
+
+                        test -f \
+                            "${FAULT_LAB_EVIDENCE}/matrix/summary.json"
+
+                        echo 'Gateway HTTPS Fault Lab PASS'
+
+                    else
+                        cat "${FAULT_LAB_EVIDENCE}/runner.log"
+
+                        echo 'FAIL: Gateway HTTPS Fault Lab failed' >&2
+                        echo 'Image publication and deployment are blocked' >&2
+
+                        exit 1
+                    fi
+                '''
+            }
+
+            post {
+                always {
+                    script {
+                        if (env.FAULT_LAB_EVIDENCE?.trim()) {
+                            archiveArtifacts(
+                                artifacts: "${env.FAULT_LAB_EVIDENCE}/**/*",
+                                allowEmptyArchive: true,
+                                onlyIfSuccessful: false
+                            )
+                        }
+                    }
+                }
+
+                success {
+                    script {
+                        env.ASG_CHECK_FAULT_LAB = 'SUCCESS'
+                    }
+                }
+
+                failure {
+                    script {
+                        env.ASG_CHECK_FAULT_LAB = 'FAILURE'
+                    }
+                }
+
+                unstable {
+                    script {
+                        env.ASG_CHECK_FAULT_LAB = 'NEUTRAL'
+                    }
+                }
+
+                aborted {
+                    script {
+                        env.ASG_CHECK_FAULT_LAB = 'CANCELED'
+                    }
                 }
             }
         }
@@ -897,6 +1073,10 @@ log "DEPLOYMENT SUCCESSFUL: $SOURCE_COMMIT"
                     [
                         name: 'ASG CI / Smoke Test',
                         result: env.ASG_CHECK_SMOKE
+                    ],
+                    [
+                        name: 'ASG CI / Gateway HTTPS Fault Lab',
+                        result: env.ASG_CHECK_FAULT_LAB
                     ],
                     [
                         name: 'ASG CI / Verify Release Commit',

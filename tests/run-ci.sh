@@ -32,6 +32,7 @@ lua_tests=(
   'test_risk_engine:risk_engine'
   'test_risk_redis_failure:risk_engine'
   'test_risk_reputation_ttl:risk_engine'
+  'test_gateway_fault_guard:gateway_fault_guard'
 )
 
 # Docker CLI talks to the host Docker Engine through the socket.
