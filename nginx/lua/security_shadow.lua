@@ -189,6 +189,19 @@ function M.log()
             old_action, old_status = "UNAVAILABLE", 503
         end
 
+        -- Use the actual terminal Gateway decision when available.
+        -- Shadow comparison must not infer ALLOW from an incomplete risk context.
+        local terminal_status =
+            state.ctx.security.gateway_terminal_status
+
+        if terminal_status == 503 then
+            old_action, old_status = "UNAVAILABLE", 503
+        elseif terminal_status == 403 then
+            old_action, old_status = "BLOCK_REQUEST", 403
+        elseif terminal_status == 429 then
+            old_action, old_status = "THROTTLE", 429
+        end
+
         local status_diff = (old_status ~= policy.http_status)
         local action_diff = (old_action ~= policy.action)
         -- Some legacy reasons (risk_block/risk_limit/other) have no deterministic
@@ -200,7 +213,7 @@ function M.log()
         local reason_diff = comparable and
             (normalized_reason(legacy_reason) ~= policy.reason) or false
         local unmapped = not comparable and old_status ~= nil
-        local partial = skipped_required
+        local partial = skipped_required or terminal_status ~= nil
             or state.prelogin == "locked" or state.prelogin == "unavailable"
             or (state.trace.required_control_failed == true)
             or (#report.errors > 0)
@@ -211,7 +224,15 @@ function M.log()
         local has_error = state.instrumentation_error ~= nil or #report.errors > 0
         local verbose = (os.getenv("SECURITY_SHADOW_LOG_ALL") or "false"):lower() == "true"
 
-        if not (verbose or status_diff or action_diff or reason_diff or has_error or unmapped) then
+        if not (
+            verbose
+            or status_diff
+            or action_diff
+            or reason_diff
+            or has_error
+            or unmapped
+            or terminal_status ~= nil
+        ) then
             return
         end
 

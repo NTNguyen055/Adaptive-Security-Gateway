@@ -128,5 +128,34 @@ class GatewayFaultWiringTests(unittest.TestCase):
                 self.assertIn("local modules = {", block)
                 self.assertIn("security_shadow.start(ctx", block)
 
+    def test_fault_decision_recorded_before_exit(self):
+        for route, block in self.route_blocks.items():
+            with self.subTest(route=route):
+                start = block.index("if fault_status then")
+                end = block.index(
+                    "return ngx.exit(fault_status)",
+                    start
+                )
+
+                termination = block[start:end]
+
+                self.assertIn(
+                    "record_gateway_termination",
+                    termination
+                )
+
+                self.assertIn(
+                    "pcall(",
+                    termination
+                )
+
+    def test_unavailable_security_events_are_logged(self):
+        self.assertRegex(
+            self.text,
+            r"map\s+\$log_security_block\s+"
+            r"\$log_security_event\s*\{"
+            r"[^}]*\bunavailable\s+1\s*;",
+        )
+
 if __name__ == "__main__":
     unittest.main()
