@@ -3,41 +3,164 @@ local _M = {}
 local ngx        = ngx
 local tonumber   = tonumber
 local math_min   = math.min
-local redis_helper = require "redis_helper" -- FIX 1: Tái sử dụng redis_helper.lua
+local redis_helper = require "redis_helper"
 local telegram_alert = require "telegram_alert"
 
+
 -- ============================================================
--- CONFIG
+-- CONFIG: VALIDATION
 -- ============================================================
+
+local DEFAULT_LIMIT_THRESHOLD = 50
+local DEFAULT_BLOCK_THRESHOLD = 80
+local DEFAULT_DECAY_FACTOR = 0.1
+
+-- Avoid repeating configuration warnings for every request.
+-- Module-local state is isolated per OpenResty worker.
+local warned_config = {}
+
+local function warn_invalid_config_once(key, message)
+    if warned_config[key] then
+        return
+    end
+
+    warned_config[key] = true
+
+    ngx.log(
+        ngx.WARN,
+        "[RISK][CONFIG] ",
+        message
+    )
+end
+
+local function is_finite_number(value)
+    return type(value) == "number"
+        and value == value
+        and value ~= math.huge
+        and value ~= -math.huge
+end
+
 local function get_config()
+    -- --------------------------------------------------------
+    -- 1. Validate LIMIT/BLOCK thresholds together.
+    -- Invariant: 0 < limit < block <= 100.
+    -- --------------------------------------------------------
+    local raw_limit = os.getenv("RISK_LIMIT_THRESHOLD")
+    local raw_block = os.getenv("RISK_BLOCK_THRESHOLD")
+
+    local limit_threshold = DEFAULT_LIMIT_THRESHOLD
+    local block_threshold = DEFAULT_BLOCK_THRESHOLD
+
+    if raw_limit ~= nil then
+        limit_threshold = tonumber(raw_limit)
+    end
+
+    if raw_block ~= nil then
+        block_threshold = tonumber(raw_block)
+    end
+
+    if not is_finite_number(limit_threshold)
+        or not is_finite_number(block_threshold)
+        or limit_threshold <= 0
+        or block_threshold > 100
+        or limit_threshold >= block_threshold then
+
+        warn_invalid_config_once(
+            "thresholds",
+            "Invalid risk thresholds; using defaults " ..
+            "LIMIT=50 BLOCK=80"
+        )
+
+        limit_threshold = DEFAULT_LIMIT_THRESHOLD
+        block_threshold = DEFAULT_BLOCK_THRESHOLD
+    end
+
+    -- --------------------------------------------------------
+    -- 2. Strictly parse the decay toggle.
+    -- Missing: retain historical default=true.
+    -- Explicit false: supported.
+    -- Invalid: use documented default and warn.
+    -- --------------------------------------------------------
+    local raw_decay_enabled =
+        os.getenv("RISK_DECAY_ENABLED")
+
+    local decay_enabled = true
+
+    if raw_decay_enabled ~= nil then
+        local normalized = ""
+
+        if type(raw_decay_enabled) == "string" then
+            normalized = raw_decay_enabled:lower()
+        end
+
+        if normalized == "true" then
+            decay_enabled = true
+        elseif normalized == "false" then
+            decay_enabled = false
+        else
+            warn_invalid_config_once(
+                "decay_enabled",
+                "Invalid RISK_DECAY_ENABLED; " ..
+                "using default=true"
+            )
+
+            decay_enabled = true
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- 3. Validate decay factor.
+    -- Preserve the existing [0,1] clamp contract.
+    -- --------------------------------------------------------
+    local raw_factor = os.getenv("RISK_DECAY_FACTOR")
+    local decay_factor = DEFAULT_DECAY_FACTOR
+
+    if raw_factor ~= nil then
+        local parsed = tonumber(raw_factor)
+
+        if not is_finite_number(parsed) then
+            warn_invalid_config_once(
+                "decay_factor",
+                "Invalid RISK_DECAY_FACTOR; " ..
+                "using default=0.1"
+            )
+        else
+            if parsed < 0 or parsed > 1 then
+                warn_invalid_config_once(
+                    "decay_factor",
+                    "RISK_DECAY_FACTOR outside [0,1]; " ..
+                    "clamping to supported range"
+                )
+            end
+
+            decay_factor =
+                math.max(0, math.min(1, parsed))
+        end
+    end
+
     return {
-        -- Ngưỡng hành động của Risk Engine:
-        -- Đạt 50 điểm sẽ bị Limit (giới hạn / Captcha), đạt 80 điểm sẽ bị Block (chặn hoàn toàn).
-        block_threshold = tonumber(os.getenv("RISK_BLOCK_THRESHOLD")) or 80,
-        limit_threshold = tonumber(os.getenv("RISK_LIMIT_THRESHOLD")) or 50,
-        -- Time-based reputation decay.  Decay is applied to stored reputation
-        -- when a *subsequent confirmed attack* is evaluated, not on clean traffic.
-        -- Opt out with RISK_DECAY_ENABLED=false if the deployment requires it.
-        decay_enabled = (os.getenv("RISK_DECAY_ENABLED") or "true"):lower() == "true",
-        -- Fraction removed per 5-minute period (clamped to [0, 1]).
-        decay_factor = tonumber(os.getenv("RISK_DECAY_FACTOR")) or 0.1,
+        limit_threshold = limit_threshold,
+        block_threshold = block_threshold,
+        decay_enabled = decay_enabled,
+        decay_factor = decay_factor,
     }
 end
 
 local MAX_RISK = 100
 
--- Time-bounded IP reputation and automatic blocks (local baseline).
--- Automatic blocks must not populate the persistent manual-ban set.
+-- Time-bounded IP reputation only.
+-- Risk Engine cannot issue automatic IP bans.
+-- Manual blacklist and automatic ban authorization are separate.
 local REPUTATION_TTL_NORMAL = 3600       -- 1 hour
 local REPUTATION_TTL_ELEVATED = 7200     -- 2 hours
 local AUTOMATIC_BLOCK_TTL = 900         -- 15 minutes
 local REPUTATION_DECAY_PERIOD = 300       -- 5 minutes
 
--- Compare-and-swap: check the exact snapshot read by this request before
--- committing score, timestamp, and auto-ban in one EVAL.  A conflicting
--- concurrent request returns 0; the caller MUST reload and recompute.
--- This prevents silent lost updates while retaining the existing scoring code.
--- Redis scripts are atomic in execution/visibility, but not rollback-on-error.
+-- Atomic Redis reputation compare-and-swap.
+-- Checks score, timestamp and brute-force history snapshots.
+-- Legacy KEYS/ARGV positions remain for compatibility.
+-- write_ban must always be 0; no blacklist writes are permitted.
+-- Redis Lua execution is atomic, but does not roll back on errors.
 local WRITE_REPUTATION_SCRIPT = [[
 local score_key = KEYS[1]
 local seen_key = KEYS[2]
@@ -58,7 +181,7 @@ if not score or score ~= score or score < 0 or score > 100
     or not ban_ttl or ban_ttl < 1 or ban_ttl > 900
     or (write_seen == 1 and not seen_at)
     or (write_seen ~= 0 and write_seen ~= 1)
-    or (write_ban ~= 0 and write_ban ~= 1)
+    or write_ban ~= 0
     or not expected_score or not expected_seen or not expected_history then
     return redis.error_reply('invalid reputation script args')
 end
@@ -70,9 +193,6 @@ if (redis.call('GET', history_key) or MISSING) ~= expected_history then return 0
 redis.call('SET', score_key, ARGV[1], 'EX', rep_ttl)
 if write_seen == 1 then
     redis.call('SET', seen_key, ARGV[3], 'EX', rep_ttl)
-end
-if write_ban == 1 then
-    redis.call('SET', ban_key, '1', 'EX', ban_ttl)
 end
 return 1
 ]]
@@ -124,7 +244,6 @@ end
 -- Mỗi khi các module trước (WAF, Bot, Geo, Brute-force) phát hiện bất thường,
 -- chúng không chặn ngay mà gắn "signal" vào Request. Risk Engine sẽ tổng hợp ở đây.
 local SIGNAL_BONUS = {
-
     -- XFF
     xff_private_client = 5,
     xff_private_chain  = 25,
@@ -152,9 +271,6 @@ local SIGNAL_BONUS = {
 
     -- Geo
     geo_block          = 5,
-
-    -- Brute force
-    brute_force_attack = 30,
 }
 
 -- ============================================================
@@ -211,9 +327,7 @@ function _M.run(ctx)
         or ctx.security.rate_limit_hard
         or ctx.security.redis_rate_exceeded
         or ctx.security.bad_bot_scanner
-        or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
-        or ctx.security.brute_force_attack
 
     if ctx.security.jwt_missing and not independent_abuse then
         ctx.security.block = true
@@ -243,14 +357,12 @@ function _M.run(ctx)
         ctx.security.waf_sqli
         or ctx.security.waf_xss
         or ctx.security.bad_bot_scanner
-        or ctx.security.bad_bot_headless
-        or ctx.security.brute_force_attack
-        or ctx.security.xff_spoof
         or ctx.security.xff_chain_abuse
-        or ctx.security.xff_malformed
-        or ctx.security.xff_private_chain
         or ctx.security.jwt_replay
         or ctx.security.jwt_alg_attack
+        or ctx.security.jwt_invalid
+        or ctx.security.geo_blocked
+        or ctx.security.ip_blacklisted
 
     if has_rate_violation and not has_attack_evidence then
         ctx.security.block = true
@@ -274,20 +386,38 @@ function _M.run(ctx)
         return
     end
 
-    -- ============================================================
-    -- CONTEXT-ONLY FALSE POSITIVE GUARD
-    -- ============================================================
-    -- Các tín hiệu ngữ cảnh không đủ để kết luận IP tấn công.
-    -- Không tích lũy reputation hoặc blacklist nếu không có
-    -- bằng chứng tấn công độc lập.
-
+    -- Only selected stronger detector evidence may enter
+    -- cumulative IP reputation.
+    -- Contextual/header-only, rate-only, JWT state and headless-only
+    -- observations must not poison shared NAT/CGNAT reputation.
     local reputation_worthy =
-        independent_abuse
-        or ctx.security.bad_bot_headless
-        or ctx.security.jwt_replay
-        or ctx.security.jwt_alg_attack
-        or ctx.security.xff_malformed
-        or ctx.security.xff_private_chain
+        ctx.security.waf_sqli
+        or ctx.security.waf_xss
+        or ctx.security.bad_bot_scanner
+
+    -- Headless-only is a request-scoped throttle.
+    -- Do not persist an IP-wide reputation penalty for this signal.
+    -- Preserve any stronger denial already established upstream.
+    if ctx.security.bad_bot_headless
+        and not reputation_worthy
+        and ctx.security.block ~= true
+        and ctx.security.risk_action ~= "block" then
+
+        ctx.security.risk_action = "limit"
+        ctx.security.risk_final = base_risk
+
+        ngx.var.log_risk_score =
+            string.format("%.1f", base_risk)
+
+        ngx.var.log_security_block = "limit"
+
+        ngx.log(
+            ngx.INFO,
+            "[RISK] Headless request-only mitigation; reputation unchanged"
+        )
+
+        return
+    end
 
     if not reputation_worthy then
         -- Giữ điểm quan sát phục vụ audit.
@@ -400,8 +530,9 @@ function _M.run(ctx)
         end
 
         -- =========================================================================
-        -- BRUTE-FORCE REPUTATION TRACKING
-        -- Kiểm tra lịch sử brute-force để accumulate risk across windows
+        -- BRUTE-FORCE HISTORY CAS SNAPSHOT
+        -- Read history only to detect concurrent Redis modifications.
+        -- Never derive shared-IP risk penalties from failed logins.
         -- =========================================================================
         local bf_history_key = "brute_force:history:" .. ip
         local bf_history, bf_err = red:get(bf_history_key)
@@ -412,34 +543,9 @@ function _M.run(ctx)
             return
         end
 
-        -- Liên kết dữ liệu chéo module: Đọc lịch sử từ module Brute-force.
-        -- Nếu IP này có "tiền án" (high_risk_count > 0) thì đè thêm điểm phạt nặng hơn vào Risk tổng.
-        if bf_history and bf_history ~= ngx.null then
-            -- Parse history và count high-risk attempts
-            local high_risk_count = 0
-            for entry in bf_history:gmatch("[^,]+") do
-                local _, attempt = entry:match("^([^:]+):(%d+)$")
-                if attempt and tonumber(attempt) >= 5 then
-                    high_risk_count = high_risk_count + 1
-                end
-            end
-
-            -- Nếu có lịch sử brute-force >= 5 lần, tăng penalty thêm
-            if high_risk_count > 0 then
-                local persistent_penalty = high_risk_count * 15
-                final_risk = math_min(final_risk + persistent_penalty, MAX_RISK)
-                ngx.log(ngx.WARN, "[RISK] Brute-force history detected for IP ", ip,
-                        " - high_risk_count=", high_risk_count,
-                        " - additional_penalty=", persistent_penalty)
-            end
-        end
-
-        -- Momentum: Phạt nặng hơn nếu request liên tiếp chứa dấu hiệu xấu
-        -- Tăng ngưỡng lên 50 để tránh phạt oan người dùng chỉ mở F12 (Dev_tool)
-        -- Nếu reputation đã đạt ngưỡng block, không cộng thêm momentum
-        if base_risk > 50 and reputation < cfg.block_threshold then
-            final_risk = math_min(final_risk + 10, MAX_RISK)
-        end
+        -- Brute-force history remains a Redis CAS snapshot only.
+        -- Shared-IP login failures are not IP reputation evidence.
+        -- Do not add a persistent penalty from this history.
 
         -- =========================================================================
         -- TỐI ƯU HÓA REDIS WRITE I/O
@@ -453,27 +559,23 @@ function _M.run(ctx)
             -- Bounded reputation lifetime: 1 hour normal / 2 hours elevated.
             -- Both request decisions and IP reputation remain separate from a manual ban.
             local rep_ttl = REPUTATION_TTL_NORMAL
+
             if final_risk >= cfg.limit_threshold then
                 rep_ttl = REPUTATION_TTL_ELEVATED
             end
-            local ban_now = final_risk >= cfg.block_threshold
+
             local committed, write_err = red:eval(
                 WRITE_REPUTATION_SCRIPT, 4,
                 key, timestamp_key, "blacklist:" .. ip, bf_history_key,
                 string.format("%.2f", final_risk), rep_ttl,
                 tostring(now or 0), cfg.decay_enabled and 1 or 0,
-                ban_now and 1 or 0, AUTOMATIC_BLOCK_TTL,
+                0, AUTOMATIC_BLOCK_TTL,
                 reputation_raw == ngx.null and MISSING_REDIS_VALUE or reputation_raw,
                 last_seen_raw == ngx.null and MISSING_REDIS_VALUE or last_seen_raw,
                 bf_history == ngx.null and MISSING_REDIS_VALUE or bf_history
             )
             if committed == 1 then
                 committed_update = true
-                if ban_now then
-                    ngx.log(ngx.WARN, "[RISK] Temporary auto-block ip=", ip,
-                        " final_risk=", string.format("%.1f", final_risk),
-                        " ttl=", AUTOMATIC_BLOCK_TTL, "s")
-                end
             elseif committed == 0 then
                 -- Another request changed this snapshot. Re-read and recompute.
                 ngx.log(ngx.INFO, "[RISK] Reputation CAS contention ip=", ip,
@@ -527,7 +629,7 @@ function _M.run(ctx)
             ip = ip,
             attack_type = attack_types_str,
             score = final_risk,
-            reason = "Tạm chặn vì tín hiệu tấn công và điểm rủi ro cao",
+            reason = "Request bị từ chối vì mức rủi ro cao; không phát hành IP ban",
             details = "signals=" .. attack_types_str
         })
 

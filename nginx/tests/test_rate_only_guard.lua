@@ -115,7 +115,7 @@ case("confirmed WAF SQLi is not bypassed by rate-only guard", function()
     check(ctx.security.risk_action == "block", "WAF action lost")
     check(state.redis_calls > 0, "strong WAF evidence should reach reputation handling")
     check(state.kv["risk:v1:" .. ip] ~= nil, "WAF reputation not written")
-    check(state.kv["blacklist:" .. ip] ~= nil, "WAF blacklist behavior unexpectedly removed")
+    check(state.kv["blacklist:" .. ip] == nil, "WAF and rate-limit combination must not issue an IP ban")
 end)
 case("context-only signals remain non-punitive", function()
     local ctx = {security = {client_ip = ip, risk = 40, signals = {"xff_private_client"}}}

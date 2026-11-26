@@ -86,8 +86,26 @@ end)
 
 run_case("limiter error is logged but not mistaken for a rejection", function()
     local ctx = request("error", "192.0.2.10", 0)
-    check(not ctx.security.block, "limiter operational error should not act as abuse")
-    check(not ctx.security.rate_limit_hard, "unexpected hard flag")
+
+    check(
+        not ctx.security.block,
+        "limiter operational error should not act as abuse"
+    )
+
+    check(
+        not ctx.security.rate_limit_hard,
+        "unexpected hard flag"
+    )
+
+    check(
+        ctx.security.local_rl_error == true,
+        "local limiter operational failure marker missing"
+    )
+
+    check(
+        ctx.security.risk == 0,
+        "infrastructure failure must not increase risk"
+    )
 end)
 
 run_case("limiter instance is cached per worker", function()

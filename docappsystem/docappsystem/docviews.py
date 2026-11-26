@@ -13,13 +13,17 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponseForbidden
 from django.http import HttpResponse, HttpResponseBadRequest
-from django.views.decorators.http import require_POST
 from .permissions import doctor_required
 
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.contrib.auth.password_validation import validate_password
-from django.views.decorators.http import require_http_methods
+
+from django.views.decorators.http import (
+    require_POST,
+    require_http_methods,
+    require_safe,
+)
 
 # View đăng ký bác sĩ
 @require_http_methods(["GET", "POST"])
@@ -121,6 +125,7 @@ def DOCSIGNUP(request):
 
 # Trang dashboard chính của bác sĩ
 @doctor_required
+@require_safe
 def DOCTORHOME(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -142,6 +147,7 @@ def DOCTORHOME(request):
 
 # Xem danh sách lịch hẹn của bác sĩ
 @doctor_required
+@require_safe
 def View_Appointment(request):
     try:
         doctor_admin = request.user
@@ -171,6 +177,7 @@ def View_Appointment(request):
 # Xem chi tiết lịch hẹn của bệnh nhân
 @doctor_required
 @login_required(login_url="/login/")
+@require_safe
 def Patient_Appointment_Details(request, id):
     # Chỉ tài khoản bác sĩ mới được truy cập.
     if str(request.user.user_type) != "2":
@@ -227,6 +234,7 @@ def Patient_Appointment_Details_Remark(request):
 
 # Xem danh sách lịch hẹn đã duyệt
 @doctor_required
+@require_safe
 def Patient_Approved_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -237,6 +245,7 @@ def Patient_Approved_Appointment(request):
 
 # Xem danh sách lịch hẹn đã hủy
 @doctor_required
+@require_safe
 def Patient_Cancelled_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -247,6 +256,7 @@ def Patient_Cancelled_Appointment(request):
 
 # Xem danh sách lịch hẹn mới
 @doctor_required
+@require_safe
 def Patient_New_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -257,6 +267,7 @@ def Patient_New_Appointment(request):
 
 # Xem danh sách lịch hẹn đã duyệt (dạng list khác)
 @doctor_required
+@require_safe
 def Patient_List_Approved_Appointment(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -267,6 +278,7 @@ def Patient_List_Approved_Appointment(request):
 
 # Xem chi tiết lịch hẹn
 @doctor_required
+@require_safe
 def DoctorAppointmentList(request, id):
     appointment = get_object_or_404(
         Appointment,
@@ -327,6 +339,7 @@ def Patient_Appointment_Prescription(request):
 
 # Xem lịch hẹn đã hoàn thành
 @doctor_required
+@require_safe
 def Patient_Appointment_Completed(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -337,6 +350,7 @@ def Patient_Appointment_Completed(request):
 
 # Tìm kiếm lịch hẹn theo tên hoặc mã lịch hẹn
 @doctor_required
+@require_http_methods(["GET"])
 def Search_Appointments(request):
     doctor_admin = request.user
     doctor_reg = DoctorReg.objects.get(admin=doctor_admin)
@@ -360,6 +374,7 @@ def Search_Appointments(request):
 
 # Báo cáo lịch hẹn theo khoảng ngày
 @doctor_required
+@require_safe
 def Between_Date_Report(request):
     start_date = request.GET.get('start_date')
     end_date = request.GET.get('end_date')

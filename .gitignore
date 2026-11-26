@@ -63,3 +63,6 @@ htmlcov/
 # ── NODE (nếu có frontend) ───────────────────────────────────────────────────
 node_modules/
 npm-debug.log*
+
+# Gateway HTTPS fault lab generated evidence
+/gateway-fault-lab-results*/

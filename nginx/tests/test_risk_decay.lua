@@ -114,7 +114,7 @@ run_case("legacy score without timestamp is not silently forgiven", function()
     approx(ctx.security.risk_final,80)
     check(ctx.security.risk_action == "block", "legacy high score unexpectedly bypassed")
     check(tonumber(state.kv["risk:v1:last_seen:"..ip]) == 3000, "legacy score timestamp not initialized")
-    check(state.kv["blacklist:"..ip]=="1", "expected temporary auto-block")
+    check(state.kv["blacklist:"..ip] == nil, "Legacy reputation must not issue an automatic IP ban")
 end)
 run_case("clock moving backwards cannot forgive reputation", function()
     state.now=2000

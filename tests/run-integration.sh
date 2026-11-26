@@ -148,9 +148,12 @@ if [[ "$MODE" == redis || "$MODE" == core || "$MODE" == all ]]; then
 fi
 
 if [[ "$MODE" == http || "$MODE" == core || "$MODE" == all ]]; then
-  run_one "Django login and brute-force lockout" nginx/tests/test_brute_force_login_live.sh
+  run_one "Django login NAT-aware telemetry" nginx/tests/test_brute_force_login_live.sh
   ((count+=1))
   run_one "HTTP blacklist lifecycle" nginx/tests/test_blacklist_http_live.sh
+  ((count+=1))
+  run_one "Authorized IP ban persistence and HTTP lifecycle" \
+  nginx/tests/test_authorized_ban_live.sh
   ((count+=1))
   run_one "Structured security JSON access logs" nginx/tests/test_security_json_live.sh
   ((count+=1))

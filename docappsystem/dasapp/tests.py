@@ -853,20 +853,21 @@ class DoctorRegistrationApprovalTests(TestCase):
     def test_activated_doctor_can_login(self):
         user = self.register_doctor()
 
-        # Mô phỏng quyết định kích hoạt của quản trị viên.
+        # Mô phỏng quản trị viên kích hoạt tài khoản bác sĩ.
         user.is_active = True
         user.save(update_fields=["is_active"])
 
-        with patch("docappsystem.views.record_login_attempt"):
-            response = self.client.post(
-                reverse("doLogin"),
-                {
-                    "email": self.email,
-                    "password": self.password,
-                },
-            )
+        response = self.client.post(
+            reverse("doLogin"),
+            {
+                "email": self.email,
+                "password": self.password,
+            },
+        )
 
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["X-Login-Status"], "success")
+
         self.assertEqual(
             self.client.session["_auth_user_id"],
             str(user.pk),
